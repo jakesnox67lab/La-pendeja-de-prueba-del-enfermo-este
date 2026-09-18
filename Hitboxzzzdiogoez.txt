@@ -1,0 +1,1587 @@
+-- ═══════════════════════════════════════════════════════════════
+-- HITBOX EXPANDER + DAMAGE REPEATER (FIXED for Delta / Xeno)
+-- ═══════════════════════════════════════════════════════════════
+
+local ok, err = pcall(function()
+
+-- ==================== SERVICIOS ====================
+local Players            = game:GetService("Players")
+local RunService         = game:GetService("RunService")
+local UserInputService   = game:GetService("UserInputService")
+local Workspace          = game:GetService("Workspace")
+local ReplicatedStorage  = game:GetService("ReplicatedStorage")
+local CoreGui            = game:GetService("CoreGui")
+
+local player = Players.LocalPlayer
+
+-- ==================== UI GLOBALS (forward declaration) ====================
+local hitboxBtn, tpWalkBtn, antiRagdollBtn, damageRepeaterBtn
+local walkSpeedBtn, walkSpeedValueLabel, tpSpeedValueLabel
+local hitboxSizeLabel, hitboxTransparencyLabel
+local repeatInput, distanceInput, repeatDistanceLabel, repeatStatusLabel
+local targetBox, targetStatus, clearTargetBtn, closestBtn, searchResult
+local hitboxConnection
+
+-- ==================== VARIABLES PRINCIPALES ====================
+local HitboxEnabled      = false
+local AntiRagdollEnabled = false
+local targetPlayer       = nil
+local exactTargetName    = ""
+
+local HITBOX_SIZE         = 30
+local HITBOX_TRANSPARENCY = 0.5
+local HITBOX_COLOR        = Color3.fromRGB(255, 0, 0)
+
+local WalkSpeedEnabled      = false
+local WalkSpeedValue        = 16
+local loopWalkSpeedConnection = nil
+
+local TPWalkEnabled  = false
+local TPSpeedValue   = 3
+local tpWalkConnection = nil
+
+-- ==================== DAMAGE REPEATER ====================
+local REPEAT_AMOUNT       = 26
+local damageRepeaterEnabled = false
+local MAX_REPEAT_DISTANCE = 30
+local repeatedEvents      = {}
+local lastFireTime        = {}
+
+local DAMAGE_EVENTS = {
+    "Hit","Damage","DealDamage","TakeDamage","MeleeHit","Punch","Kick",
+    "Attack","SwordHit","Swing","Strike","Fire","Shoot","Explosion","Blast"
+}
+
+local IGNORED_EVENTS = {
+    "SayMessageRequest","MeleeUpdateEvent","NinjaBombEvent","BulletUpdateEvent",
+    "UpdateAnimation","SetAnimation","MoveEvent","JumpEvent","SitEvent","Emote",
+    "Dance","Pose","AnimationEvent","CharacterAdded","HumanoidDescription",
+    "LoadCharacter","Respawn","Teleport","UpdateMotor6D","SetMotor6D","Ragdoll","Fall"
+}
+
+-- ==================== HELPERS ====================
+local function safeParent(gui)
+    local okp = pcall(function()
+        if gethui then
+            gui.Parent = gethui()
+        elseif syn and syn.protect_gui then
+            syn.protect_gui(gui)
+            gui.Parent = CoreGui
+        else
+            gui.Parent = player:WaitForChild("PlayerGui")
+        end
+    end)
+    if not okp then
+        pcall(function() gui.Parent = player:WaitForChild("PlayerGui") end)
+    end
+end
+
+local function hasExploitFuncs()
+    return type(getrawmetatable) == "function"
+       and type(setreadonly) == "function"
+       and type(getnamecallmethod) == "function"
+end
+
+local function getDistanceBetweenPlayers(p1, p2)
+    if not p1 or not p2 then return math.huge end
+    local c1, c2 = p1.Character, p2.Character
+    if not c1 or not c2 then return math.huge end
+    local r1 = c1:FindFirstChild("HumanoidRootPart") or c1:FindFirstChild("Torso") or c1:FindFirstChild("UpperTorso")
+    local r2 = c2:FindFirstChild("HumanoidRootPart") or c2:FindFirstChild("Torso") or c2:FindFirstChild("UpperTorso")
+    if not r1 or not r2 then return math.huge end
+    return (r1.Position - r2.Position).Magnitude
+end
+
+local function getTargetPlayerFromArgs(...)
+    for i = 1, select("#", ...) do
+        local arg = select(i, ...)
+        if type(arg) == "string" then
+            local t = Players:FindFirstChild(arg)
+            if t and t ~= player then return t end
+        elseif type(arg) == "table" and arg.Name then
+            local t = Players:FindFirstChild(arg.Name)
+            if t and t ~= player then return t end
+        elseif type(arg) == "Instance" and arg:IsA("Player") and arg ~= player then
+            return arg
+        end
+    end
+    return nil
+end
+
+local function isDamageEvent(name)
+    local ln = name:lower()
+    for _, d in ipairs(DAMAGE_EVENTS) do
+        if ln == d:lower() or ln:find(d:lower(), 1, true) then return true end
+    end
+    return false
+end
+
+local function isIgnoredEvent(name)
+    local ln = name:lower()
+    for _, ig in ipairs(IGNORED_EVENTS) do
+        if ln == ig:lower() or ln:find(ig:lower(), 1, true) then return true end
+    end
+    return false
+end
+
+-- ==================== REPEAT EVENT (usa función original) ====================
+local function repeatEvent(remote, originalFire, ...)
+    local targetObj = getTargetPlayerFromArgs(...)
+    if targetObj then
+        if getDistanceBetweenPlayers(player, targetObj) > MAX_REPEAT_DISTANCE then
+            return false
+        end
+    end
+
+    local now = tick()
+    local rname = remote.Name
+    local last = lastFireTime[rname] or 0
+    if now - last < 0.05 then return false end
+    lastFireTime[rname] = now
+
+    for i = 1, REPEAT_AMOUNT do
+        pcall(function()
+            if originalFire then
+                originalFire(remote, ...)
+            elseif remote:IsA("RemoteEvent") then
+                remote.FireServer(remote, ...)
+            elseif remote:IsA("RemoteFunction") then
+                remote.InvokeServer(remote, ...)
+            end
+        end)
+        if i % 10 == 0 then task.wait(0.01) end
+    end
+    return true
+end
+
+-- ==================== MÉTODO 1: Hookear remotas ====================
+local hookedRemotes = {}
+local function findAndHookDamageRemotes()
+    local function hookRemote(remote)
+        if hookedRemotes[remote] then return end
+        if not (remote:IsA("RemoteEvent") or remote:IsA("RemoteFunction")) then return end
+
+        local rname = remote.Name
+        if isIgnoredEvent(rname) then return end
+
+        if isDamageEvent(rname) or rname:lower():find("damage", 1, true) or rname:lower():find("hit", 1, true) then
+            local methodName = remote:IsA("RemoteEvent") and "FireServer" or "InvokeServer"
+            local oldFn = remote[methodName]
+
+            local applied = pcall(function()
+                remote[methodName] = function(self, ...)
+                    if damageRepeaterEnabled then
+                        local ok2 = pcall(function()
+                            repeatEvent(self, oldFn, ...)
+                        end)
+                        if ok2 then return end
+                    end
+                    return oldFn(self, ...)
+                end
+            end)
+
+            if applied then
+                hookedRemotes[remote] = true
+                print("[HOOK] " .. rname .. " via method override")
+            end
+        end
+    end
+
+    pcall(function()
+        for _, r in pairs(ReplicatedStorage:GetDescendants()) do hookRemote(r) end
+    end)
+    pcall(function()
+        for _, r in pairs(player.PlayerGui:GetDescendants()) do hookRemote(r) end
+    end)
+    pcall(function()
+        for _, r in pairs(Workspace:GetDescendants()) do hookRemote(r) end
+    end)
+end
+
+-- ==================== MÉTODO 2: Hook metatable ====================
+local mt, oldNamecall = nil, nil
+local metatableHooked = false
+
+local function hookMetatable()
+    if metatableHooked then return false end
+    if not hasExploitFuncs() then
+        print("[WARN] Executor sin funciones de metatable (getrawmetatable/setreadonly)")
+        return false
+    end
+
+    local success = pcall(function()
+        mt = getrawmetatable(game)
+        oldNamecall = mt.__namecall
+        setreadonly(mt, false)
+
+        mt.__namecall = function(self, ...)
+            local method = getnamecallmethod()
+            local ok2, name = pcall(function() return self.Name end)
+            name = ok2 and name or ""
+
+            if damageRepeaterEnabled and (method == "FireServer" or method == "InvokeServer") then
+                if isDamageEvent(name) and not isIgnoredEvent(name) then
+                    local targetObj = getTargetPlayerFromArgs(...)
+                    if targetObj then
+                        if getDistanceBetweenPlayers(player, targetObj) <= MAX_REPEAT_DISTANCE then
+                            for i = 1, REPEAT_AMOUNT do
+                                oldNamecall(self, ...)
+                                if i % 10 == 0 then task.wait(0.005) end
+                            end
+                            return
+                        end
+                    end
+                end
+            end
+
+            return oldNamecall(self, ...)
+        end
+        metatableHooked = true
+    end)
+    return success
+end
+
+-- ==================== Activación / desactivación ====================
+local function enableDamageRepeater()
+    if damageRepeaterEnabled then return end
+
+    findAndHookDamageRemotes()
+    hookMetatable()
+
+    damageRepeaterEnabled = true
+
+    if damageRepeaterBtn then
+        damageRepeaterBtn.Text = "REP\nON"
+        damageRepeaterBtn.TextColor3 = Color3.fromRGB(80, 255, 80)
+        damageRepeaterBtn.BackgroundColor3 = Color3.fromRGB(40, 70, 40)
+    end
+    if repeatStatusLabel then
+        repeatStatusLabel.Text = "Repetir: " .. REPEAT_AMOUNT .. "x (dist: " .. MAX_REPEAT_DISTANCE .. ")"
+        repeatStatusLabel.TextColor3 = Color3.fromRGB(80, 255, 80)
+    end
+
+    print("[OK] Damage Repeater ACTIVADO | Remotes: " .. #hookedRemotes .. " | Meta: " .. tostring(metatableHooked))
+end
+
+local function disableDamageRepeater()
+    if not damageRepeaterEnabled then return end
+
+    if mt and oldNamecall and metatableHooked then
+        pcall(function()
+            mt.__namecall = oldNamecall
+            setreadonly(mt, true)
+        end)
+        metatableHooked = false
+    end
+
+    damageRepeaterEnabled = false
+    if damageRepeaterBtn then
+        damageRepeaterBtn.Text = "REP\nOFF"
+        damageRepeaterBtn.TextColor3 = Color3.fromRGB(255, 80, 80)
+        damageRepeaterBtn.BackgroundColor3 = Color3.fromRGB(30, 30, 30)
+    end
+    if repeatStatusLabel then
+        repeatStatusLabel.Text = "Repetir: " .. REPEAT_AMOUNT .. "x"
+        repeatStatusLabel.TextColor3 = Color3.fromRGB(150, 150, 150)
+    end
+    print("[X] Damage Repeater DESACTIVADO")
+end
+
+local function toggleDamageRepeater()
+    if damageRepeaterEnabled then disableDamageRepeater() else enableDamageRepeater() end
+end
+
+local function setRepeatAmount(amount)
+    REPEAT_AMOUNT = math.clamp(amount, 1, 100)
+    if repeatInput then repeatInput.Text = tostring(REPEAT_AMOUNT) end
+    if repeatStatusLabel then
+        if damageRepeaterEnabled then
+            repeatStatusLabel.Text = "Repetir: " .. REPEAT_AMOUNT .. "x (dist: " .. MAX_REPEAT_DISTANCE .. ")"
+        else
+            repeatStatusLabel.Text = "Repetir: " .. REPEAT_AMOUNT .. "x"
+        end
+    end
+end
+
+local function setRepeaterDistance(distance)
+    MAX_REPEAT_DISTANCE = math.clamp(distance, 1, 500)
+    if distanceInput then distanceInput.Text = tostring(MAX_REPEAT_DISTANCE) end
+    if repeatDistanceLabel then
+        repeatDistanceLabel.Text = "Distancia actual: " .. MAX_REPEAT_DISTANCE
+    end
+    if damageRepeaterEnabled and repeatStatusLabel then
+        repeatStatusLabel.Text = "Repetir: " .. REPEAT_AMOUNT .. "x (dist: " .. MAX_REPEAT_DISTANCE .. ")"
+    end
+end
+
+ReplicatedStorage.ChildAdded:Connect(function()
+    task.wait(0.5)
+    if damageRepeaterEnabled then findAndHookDamageRemotes() end
+end)
+player.PlayerGui.ChildAdded:Connect(function()
+    task.wait(0.5)
+    if damageRepeaterEnabled then findAndHookDamageRemotes() end
+end)
+
+-- ==================== ANTI-RAGDOLL ====================
+local antiRagdollConnection = nil
+local currentCharacterJoints = {}
+
+local function updateJoints(character)
+    if not character then return end
+    currentCharacterJoints = {}
+    for _, joint in pairs(character:GetDescendants()) do
+        if joint:IsA("Motor6D") then
+            currentCharacterJoints[joint.Name] = {
+                Part0 = joint.Part0, Part1 = joint.Part1,
+                C0 = joint.C0, C1 = joint.C1
+            }
+        end
+    end
+end
+
+local function restoreJoints()
+    for name, data in pairs(currentCharacterJoints) do
+        if data.Part0 and data.Part0.Parent then
+            if data.Part0:FindFirstChild(name) == nil then
+                local j = Instance.new("Motor6D")
+                j.Name = name
+                j.Part0 = data.Part0
+                j.Part1 = data.Part1
+                j.C0 = data.C0
+                j.C1 = data.C1
+                j.Parent = data.Part0
+            end
+        end
+    end
+end
+
+local function isInRagdoll(hum)
+    if not hum then return false end
+    local state = hum:GetState()
+    return state == Enum.HumanoidStateType.Physics
+        or state == Enum.HumanoidStateType.FallingDown
+        or hum.PlatformStand
+end
+
+local function antiRagdollLoop()
+    if not AntiRagdollEnabled then return end
+    local ch = player.Character
+    if not ch then return end
+    local hum = ch:FindFirstChild("Humanoid")
+    local rp  = ch:FindFirstChild("HumanoidRootPart")
+    if not hum or not rp then return end
+
+    updateJoints(ch)
+    if isInRagdoll(hum) then
+        restoreJoints()
+        pcall(function()
+            hum:ChangeState(Enum.HumanoidStateType.Running)
+            hum.PlatformStand = false
+            hum.Sit = false
+            hum.AutoRotate = true
+            rp.Velocity = Vector3.new(rp.Velocity.X, 20, rp.Velocity.Z)
+        end)
+    end
+end
+
+local function setupAntiRagdoll(character)
+    if antiRagdollConnection then
+        antiRagdollConnection:Disconnect()
+        antiRagdollConnection = nil
+    end
+    task.wait(0.5)
+    updateJoints(character)
+    if AntiRagdollEnabled then
+        antiRagdollConnection = RunService.Heartbeat:Connect(antiRagdollLoop)
+    end
+end
+
+local function toggleAntiRagdoll()
+    AntiRagdollEnabled = not AntiRagdollEnabled
+    if AntiRagdollEnabled then
+        if player.Character then
+            task.spawn(setupAntiRagdoll, player.Character)
+        end
+    else
+        if antiRagdollConnection then
+            antiRagdollConnection:Disconnect()
+            antiRagdollConnection = nil
+        end
+    end
+end
+
+if player.Character then
+    task.spawn(setupAntiRagdoll, player.Character)
+end
+
+player.CharacterAdded:Connect(function(ch)
+    task.spawn(setupAntiRagdoll, ch)
+end)
+
+-- ==================== BUSCAR JUGADOR ====================
+local function findPlayerByPartialName(inputText)
+    if inputText == "" or inputText:lower() == "todos" or inputText:lower() == "all" then
+        return nil, "TODOS"
+    end
+    local s = inputText:lower():gsub("%s+", "")
+    for _, p in pairs(Players:GetPlayers()) do
+        if p ~= player then
+            if p.Name:lower() == s then return p, p.Name end
+            if p.DisplayName:lower() == s then return p, p.DisplayName end
+        end
+    end
+    if #s >= 3 then
+        for _, p in pairs(Players:GetPlayers()) do
+            if p ~= player then
+                if p.Name:lower():sub(1, #s) == s then return p, p.Name end
+                if p.DisplayName:lower():sub(1, #s) == s then return p, p.DisplayName end
+            end
+        end
+        for _, p in pairs(Players:GetPlayers()) do
+            if p ~= player then
+                if p.Name:lower():find(s, 1, true) then return p, p.Name end
+                if p.DisplayName:lower():find(s, 1, true) then return p, p.DisplayName end
+            end
+        end
+    end
+    if #s > 0 and #s < 3 then return false, "Minimo 3 letras" end
+    return false, "No encontrado"
+end
+
+-- ==================== HITBOX ====================
+local function resetHitbox(t)
+    pcall(function()
+        if t.Character and t.Character:FindFirstChild("HumanoidRootPart") then
+            local rp = t.Character.HumanoidRootPart
+            rp.Size = Vector3.new(2, 2, 1)
+            rp.Transparency = 1
+            rp.Material = Enum.Material.Plastic
+            rp.Color = Color3.fromRGB(255, 255, 255)
+        end
+    end)
+end
+
+local function resetAllHitboxes()
+    for _, v in pairs(Players:GetPlayers()) do
+        if v ~= player then resetHitbox(v) end
+    end
+end
+
+local function applyHitboxToPlayer(t)
+    pcall(function()
+        if t.Character and t.Character:FindFirstChild("HumanoidRootPart") then
+            local rp = t.Character.HumanoidRootPart
+            rp.Size = Vector3.new(HITBOX_SIZE, HITBOX_SIZE, HITBOX_SIZE)
+            rp.Transparency = HITBOX_TRANSPARENCY
+            rp.Color = HITBOX_COLOR
+            rp.Material = Enum.Material.SmoothPlastic
+            rp.CanCollide = false
+        end
+    end)
+end
+
+local function shouldHitPlayer(p)
+    if p == player then return false end
+    if not p.Character then return false end
+    if not p.Character:FindFirstChild("HumanoidRootPart") then return false end
+    return true
+end
+
+local function updateHitboxes()
+    if not HitboxEnabled then
+        resetAllHitboxes()
+        return
+    end
+    if targetPlayer then
+        if shouldHitPlayer(targetPlayer) then
+            for _, v in pairs(Players:GetPlayers()) do
+                if v ~= player and v ~= targetPlayer then resetHitbox(v) end
+            end
+            applyHitboxToPlayer(targetPlayer)
+        else
+            resetHitbox(targetPlayer)
+        end
+    else
+        for _, v in pairs(Players:GetPlayers()) do
+            if shouldHitPlayer(v) then applyHitboxToPlayer(v) else resetHitbox(v) end
+        end
+    end
+end
+
+local function setHitboxSize(v)
+    HITBOX_SIZE = tonumber(v)
+    if hitboxSizeLabel then hitboxSizeLabel.Text = "Tamano actual: " .. HITBOX_SIZE end
+    if HitboxEnabled then updateHitboxes() end
+end
+
+local function setHitboxTransparency(v)
+    HITBOX_TRANSPARENCY = tonumber(v)
+    if hitboxTransparencyLabel then
+        hitboxTransparencyLabel.Text = "Transparencia actual: " .. HITBOX_TRANSPARENCY
+    end
+    if HitboxEnabled then updateHitboxes() end
+end
+
+-- ==================== MOVIMIENTO ====================
+local function getCharacter() return player.Character end
+local function getHumanoid()
+    local c = getCharacter()
+    return c and c:FindFirstChildWhichIsA("Humanoid")
+end
+
+local function setupLoopWalkSpeed()
+    if loopWalkSpeedConnection then
+        loopWalkSpeedConnection:Disconnect()
+        loopWalkSpeedConnection = nil
+    end
+    if WalkSpeedEnabled then
+        loopWalkSpeedConnection = RunService.Heartbeat:Connect(function()
+            local h = getHumanoid()
+            if h and math.abs(h.WalkSpeed - WalkSpeedValue) > 0.001 then
+                pcall(function() h.WalkSpeed = WalkSpeedValue end)
+            end
+        end)
+    end
+end
+
+local function setWalkSpeed(v)
+    WalkSpeedValue = tonumber(v)
+    local h = getHumanoid()
+    if h then pcall(function() h.WalkSpeed = WalkSpeedValue end) end
+    if walkSpeedValueLabel then
+        walkSpeedValueLabel.Text = "Velocidad actual: " .. string.format("%.2f", WalkSpeedValue)
+    end
+end
+
+local function setWalkSpeedEnabled(en)
+    WalkSpeedEnabled = en
+    setupLoopWalkSpeed()
+    local h = getHumanoid()
+    if h then
+        pcall(function() h.WalkSpeed = en and WalkSpeedValue or 16 end)
+    end
+    if walkSpeedBtn then
+        if en then
+            walkSpeedBtn.Text = "LOOP\nON"
+            walkSpeedBtn.TextColor3 = Color3.fromRGB(80, 255, 80)
+            walkSpeedBtn.BackgroundColor3 = Color3.fromRGB(40, 70, 40)
+        else
+            walkSpeedBtn.Text = "LOOP\nOFF"
+            walkSpeedBtn.TextColor3 = Color3.fromRGB(255, 80, 80)
+            walkSpeedBtn.BackgroundColor3 = Color3.fromRGB(30, 30, 30)
+        end
+    end
+end
+
+local function setupTPWalk()
+    if tpWalkConnection then
+        tpWalkConnection:Disconnect()
+        tpWalkConnection = nil
+    end
+    if TPWalkEnabled then
+        tpWalkConnection = RunService.Heartbeat:Connect(function()
+            local c, h = getCharacter(), getHumanoid()
+            if c and h and h.Parent then
+                if h.MoveDirection.Magnitude > 0 then
+                    pcall(function()
+                        c:TranslateBy(h.MoveDirection * (tonumber(TPSpeedValue) or 3))
+                    end)
+                end
+            end
+        end)
+    end
+end
+
+local function setTPSpeed(v)
+    TPSpeedValue = tonumber(v)
+    if tpSpeedValueLabel then
+        tpSpeedValueLabel.Text = "Velocidad TP: " .. string.format("%.2f", TPSpeedValue)
+    end
+end
+
+local function setTPWalkEnabled(en)
+    TPWalkEnabled = en
+    setupTPWalk()
+    if tpWalkBtn then
+        if en then
+            tpWalkBtn.Text = "TP\nON"
+            tpWalkBtn.TextColor3 = Color3.fromRGB(80, 255, 80)
+            tpWalkBtn.BackgroundColor3 = Color3.fromRGB(40, 70, 40)
+        else
+            tpWalkBtn.Text = "TP\nOFF"
+            tpWalkBtn.TextColor3 = Color3.fromRGB(255, 80, 80)
+            tpWalkBtn.BackgroundColor3 = Color3.fromRGB(30, 30, 30)
+        end
+    end
+end
+
+-- ==================== DRAG ====================
+local function MakeDraggableWithHandle(frame, handle)
+    local dragging, dragStartPos, frameStartPos = false, nil, nil
+
+    handle.InputBegan:Connect(function(input, gp)
+        if gp then return end
+        if input.UserInputType == Enum.UserInputType.MouseButton1
+        or input.UserInputType == Enum.UserInputType.Touch then
+            dragging = true
+            dragStartPos = input.Position
+            frameStartPos = frame.Position
+        end
+    end)
+
+    UserInputService.InputChanged:Connect(function(input, gp)
+        if gp then return end
+        if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement
+        or input.UserInputType == Enum.UserInputType.Touch) then
+            local d = input.Position - dragStartPos
+            frame.Position = UDim2.new(
+                frameStartPos.X.Scale, frameStartPos.X.Offset + d.X,
+                frameStartPos.Y.Scale, frameStartPos.Y.Offset + d.Y
+            )
+        end
+    end)
+
+    UserInputService.InputEnded:Connect(function(input, gp)
+        if gp then return end
+        if input.UserInputType == Enum.UserInputType.MouseButton1
+        or input.UserInputType == Enum.UserInputType.Touch then
+            dragging = false
+        end
+    end)
+end
+
+-- ==================== UI PRINCIPAL ====================
+local function CreateButtonsInterface()
+    local SG = Instance.new("ScreenGui")
+    SG.Name = "ButtonsGUI"
+    SG.ResetOnSpawn = false
+    SG.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+    safeParent(SG)
+
+    local Frame = Instance.new("Frame")
+    Frame.Size = UDim2.new(0, 320, 0, 85)
+    Frame.Position = UDim2.new(0.5, -160, 0.02, 0)
+    Frame.BackgroundColor3 = Color3.fromRGB(20, 20, 25)
+    Frame.BackgroundTransparency = 0.05
+    Frame.BorderSizePixel = 0
+    Frame.Parent = SG
+
+    local c = Instance.new("UICorner") c.CornerRadius = UDim.new(0, 12) c.Parent = Frame
+    local s = Instance.new("UIStroke")
+    s.Color = Color3.fromRGB(100, 100, 255) s.Thickness = 1.5 s.Transparency = 0.5 s.Parent = Frame
+
+    local TopBar = Instance.new("Frame")
+    TopBar.Size = UDim2.new(1, 0, 0, 35)
+    TopBar.BackgroundColor3 = Color3.fromRGB(50, 50, 65)
+    TopBar.BackgroundTransparency = 0.2
+    TopBar.BorderSizePixel = 0
+    TopBar.Parent = Frame
+    local tbc = Instance.new("UICorner") tbc.CornerRadius = UDim.new(0, 12) tbc.Parent = TopBar
+
+    local Title = Instance.new("TextLabel")
+    Title.Size = UDim2.new(0.6, 0, 1, 0)
+    Title.Position = UDim2.new(0, 12, 0, 0)
+    Title.BackgroundTransparency = 1
+    Title.Text = "||  PANEL DE CONTROL  ||"
+    Title.TextColor3 = Color3.fromRGB(200, 200, 255)
+    Title.TextSize = 11
+    Title.Font = Enum.Font.GothamBold
+    Title.TextXAlignment = Enum.TextXAlignment.Left
+    Title.Parent = TopBar
+
+    local ConfigButton = Instance.new("TextButton")
+    ConfigButton.Size = UDim2.new(0, 35, 0, 30)
+    ConfigButton.Position = UDim2.new(1, -42, 0, 2.5)
+    ConfigButton.BackgroundColor3 = Color3.fromRGB(70, 70, 90)
+    ConfigButton.Text = "CFG"
+    ConfigButton.TextColor3 = Color3.fromRGB(255, 255, 255)
+    ConfigButton.Font = Enum.Font.GothamBold
+    ConfigButton.TextSize = 12
+    ConfigButton.Parent = TopBar
+    local cbc = Instance.new("UICorner") cbc.CornerRadius = UDim.new(0, 6) cbc.Parent = ConfigButton
+
+    local BC = Instance.new("Frame")
+    BC.Size = UDim2.new(0.96, 0, 0.55, 0)
+    BC.Position = UDim2.new(0.02, 0, 0.48, 0)
+    BC.BackgroundTransparency = 1
+    BC.Parent = Frame
+
+    hitboxBtn = Instance.new("TextButton")
+    hitboxBtn.Size = UDim2.new(0.24, 0, 1, 0)
+    hitboxBtn.Position = UDim2.new(0, 0, 0, 0)
+    hitboxBtn.BackgroundColor3 = Color3.fromRGB(30, 30, 30)
+    hitboxBtn.Text = "HIT\nOFF"
+    hitboxBtn.TextColor3 = Color3.fromRGB(255, 80, 80)
+    hitboxBtn.Font = Enum.Font.GothamBold
+    hitboxBtn.TextSize = 11
+    hitboxBtn.TextWrapped = true
+    hitboxBtn.Parent = BC
+    local c1 = Instance.new("UICorner") c1.CornerRadius = UDim.new(0, 8) c1.Parent = hitboxBtn
+
+    tpWalkBtn = Instance.new("TextButton")
+    tpWalkBtn.Size = UDim2.new(0.24, 0, 1, 0)
+    tpWalkBtn.Position = UDim2.new(0.25, 0, 0, 0)
+    tpWalkBtn.BackgroundColor3 = Color3.fromRGB(30, 30, 30)
+    tpWalkBtn.Text = "TP\nOFF"
+    tpWalkBtn.TextColor3 = Color3.fromRGB(255, 80, 80)
+    tpWalkBtn.Font = Enum.Font.GothamBold
+    tpWalkBtn.TextSize = 11
+    tpWalkBtn.TextWrapped = true
+    tpWalkBtn.Parent = BC
+    local c2 = Instance.new("UICorner") c2.CornerRadius = UDim.new(0, 8) c2.Parent = tpWalkBtn
+
+    antiRagdollBtn = Instance.new("TextButton")
+    antiRagdollBtn.Size = UDim2.new(0.24, 0, 1, 0)
+    antiRagdollBtn.Position = UDim2.new(0.5, 0, 0, 0)
+    antiRagdollBtn.BackgroundColor3 = Color3.fromRGB(30, 30, 30)
+    antiRagdollBtn.Text = "RAG\nOFF"
+    antiRagdollBtn.TextColor3 = Color3.fromRGB(255, 80, 80)
+    antiRagdollBtn.Font = Enum.Font.GothamBold
+    antiRagdollBtn.TextSize = 11
+    antiRagdollBtn.TextWrapped = true
+    antiRagdollBtn.Parent = BC
+    local c3 = Instance.new("UICorner") c3.CornerRadius = UDim.new(0, 8) c3.Parent = antiRagdollBtn
+
+    damageRepeaterBtn = Instance.new("TextButton")
+    damageRepeaterBtn.Size = UDim2.new(0.24, 0, 1, 0)
+    damageRepeaterBtn.Position = UDim2.new(0.75, 0, 0, 0)
+    damageRepeaterBtn.BackgroundColor3 = Color3.fromRGB(30, 30, 30)
+    damageRepeaterBtn.Text = "REP\nOFF"
+    damageRepeaterBtn.TextColor3 = Color3.fromRGB(255, 80, 80)
+    damageRepeaterBtn.Font = Enum.Font.GothamBold
+    damageRepeaterBtn.TextSize = 11
+    damageRepeaterBtn.TextWrapped = true
+    damageRepeaterBtn.Parent = BC
+    local c4 = Instance.new("UICorner") c4.CornerRadius = UDim.new(0, 8) c4.Parent = damageRepeaterBtn
+
+    MakeDraggableWithHandle(Frame, TopBar)
+    return SG, Frame, ConfigButton
+end
+
+-- ==================== UI CONFIG ====================
+local function CreateConfigInterface()
+    local SG = Instance.new("ScreenGui")
+    SG.Name = "ConfigGUI"
+    SG.ResetOnSpawn = false
+    SG.Enabled = false
+    SG.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+    safeParent(SG)
+
+    local Frame = Instance.new("Frame")
+    Frame.Size = UDim2.new(0, 260, 0, 400)
+    Frame.Position = UDim2.new(0.5, -130, 0.5, -200)
+    Frame.BackgroundColor3 = Color3.fromRGB(15, 15, 15)
+    Frame.BorderSizePixel = 0
+    Frame.ClipsDescendants = true
+    Frame.Parent = SG
+    local c = Instance.new("UICorner") c.CornerRadius = UDim.new(0, 12) c.Parent = Frame
+    local s = Instance.new("UIStroke")
+    s.Color = Color3.fromRGB(100, 100, 255) s.Thickness = 1.5 s.Transparency = 0.5 s.Parent = Frame
+
+    local TB = Instance.new("Frame")
+    TB.Size = UDim2.new(1, 0, 0, 35)
+    TB.BackgroundColor3 = Color3.fromRGB(50, 50, 65)
+    TB.BackgroundTransparency = 0.1
+    TB.BorderSizePixel = 0
+    TB.Parent = Frame
+    local tbc = Instance.new("UICorner") tbc.CornerRadius = UDim.new(0, 12) tbc.Parent = TB
+
+    local T = Instance.new("TextLabel")
+    T.Size = UDim2.new(0.7, 0, 1, 0)
+    T.Position = UDim2.new(0, 12, 0, 0)
+    T.BackgroundTransparency = 1
+    T.Text = "|| CONFIGURACION ||"
+    T.TextColor3 = Color3.fromRGB(255, 200, 100)
+    T.TextSize = 11
+    T.Font = Enum.Font.GothamBold
+    T.TextXAlignment = Enum.TextXAlignment.Left
+    T.Parent = TB
+
+    local CloseBtn = Instance.new("TextButton")
+    CloseBtn.Size = UDim2.new(0, 28, 0, 28)
+    CloseBtn.Position = UDim2.new(1, -34, 0, 3.5)
+    CloseBtn.BackgroundColor3 = Color3.fromRGB(180, 40, 40)
+    CloseBtn.Text = "X"
+    CloseBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+    CloseBtn.TextSize = 14
+    CloseBtn.Font = Enum.Font.GothamBold
+    CloseBtn.Parent = TB
+    local cc = Instance.new("UICorner") cc.CornerRadius = UDim.new(0, 6) cc.Parent = CloseBtn
+
+    local Content = Instance.new("ScrollingFrame")
+    Content.Size = UDim2.new(1, 0, 1, -35)
+    Content.Position = UDim2.new(0, 0, 0, 35)
+    Content.BackgroundTransparency = 1
+    Content.ScrollBarThickness = 4
+    Content.CanvasSize = UDim2.new(0, 0, 0, 500)
+    Content.Parent = Frame
+    local LL = Instance.new("UIListLayout") LL.Padding = UDim.new(0, 5) LL.Parent = Content
+
+    -- HITBOX
+    local hT = Instance.new("TextLabel")
+    hT.Size = UDim2.new(0.9, 0, 0, 20)
+    hT.BackgroundTransparency = 1
+    hT.Text = "[+] HITBOX"
+    hT.TextColor3 = Color3.fromRGB(255, 200, 100)
+    hT.Font = Enum.Font.GothamBold
+    hT.TextSize = 11
+    hT.TextXAlignment = Enum.TextXAlignment.Left
+    hT.Parent = Content
+
+    local sc = Instance.new("Frame")
+    sc.Size = UDim2.new(0.9, 0, 0, 30)
+    sc.BackgroundTransparency = 1
+    sc.Parent = Content
+
+    local sl = Instance.new("TextLabel")
+    sl.Size = UDim2.new(0.4, 0, 1, 0)
+    sl.BackgroundTransparency = 1
+    sl.Text = "Tamano:"
+    sl.TextColor3 = Color3.fromRGB(200, 200, 200)
+    sl.Font = Enum.Font.Gotham
+    sl.TextSize = 10
+    sl.TextXAlignment = Enum.TextXAlignment.Left
+    sl.Parent = sc
+
+    local hitboxSizeInput = Instance.new("TextBox")
+    hitboxSizeInput.Size = UDim2.new(0.5, 0, 1, 0)
+    hitboxSizeInput.Position = UDim2.new(0.48, 0, 0, 0)
+    hitboxSizeInput.BackgroundColor3 = Color3.fromRGB(25, 25, 25)
+    hitboxSizeInput.TextColor3 = Color3.fromRGB(255, 255, 255)
+    hitboxSizeInput.Font = Enum.Font.Gotham
+    hitboxSizeInput.TextSize = 10
+    hitboxSizeInput.Text = "30"
+    hitboxSizeInput.Parent = sc
+    local sic = Instance.new("UICorner") sic.CornerRadius = UDim.new(0, 5) sic.Parent = hitboxSizeInput
+
+    hitboxSizeLabel = Instance.new("TextLabel")
+    hitboxSizeLabel.Size = UDim2.new(0.9, 0, 0, 20)
+    hitboxSizeLabel.BackgroundTransparency = 1
+    hitboxSizeLabel.Text = "Tamano actual: 30"
+    hitboxSizeLabel.TextColor3 = Color3.fromRGB(150, 150, 150)
+    hitboxSizeLabel.Font = Enum.Font.Gotham
+    hitboxSizeLabel.TextSize = 9
+    hitboxSizeLabel.TextXAlignment = Enum.TextXAlignment.Left
+    hitboxSizeLabel.Parent = Content
+
+    local tc = Instance.new("Frame")
+    tc.Size = UDim2.new(0.9, 0, 0, 30)
+    tc.BackgroundTransparency = 1
+    tc.Parent = Content
+
+    local tl = Instance.new("TextLabel")
+    tl.Size = UDim2.new(0.4, 0, 1, 0)
+    tl.BackgroundTransparency = 1
+    tl.Text = "Transparencia:"
+    tl.TextColor3 = Color3.fromRGB(200, 200, 200)
+    tl.Font = Enum.Font.Gotham
+    tl.TextSize = 10
+    tl.TextXAlignment = Enum.TextXAlignment.Left
+    tl.Parent = tc
+
+    local hitboxTransparencyInput = Instance.new("TextBox")
+    hitboxTransparencyInput.Size = UDim2.new(0.5, 0, 1, 0)
+    hitboxTransparencyInput.Position = UDim2.new(0.48, 0, 0, 0)
+    hitboxTransparencyInput.BackgroundColor3 = Color3.fromRGB(25, 25, 25)
+    hitboxTransparencyInput.TextColor3 = Color3.fromRGB(255, 255, 255)
+    hitboxTransparencyInput.Font = Enum.Font.Gotham
+    hitboxTransparencyInput.TextSize = 10
+    hitboxTransparencyInput.Text = "0.5"
+    hitboxTransparencyInput.Parent = tc
+    local tic = Instance.new("UICorner") tic.CornerRadius = UDim.new(0, 5) tic.Parent = hitboxTransparencyInput
+
+    hitboxTransparencyLabel = Instance.new("TextLabel")
+    hitboxTransparencyLabel.Size = UDim2.new(0.9, 0, 0, 20)
+    hitboxTransparencyLabel.BackgroundTransparency = 1
+    hitboxTransparencyLabel.Text = "Transparencia actual: 0.5"
+    hitboxTransparencyLabel.TextColor3 = Color3.fromRGB(150, 150, 150)
+    hitboxTransparencyLabel.Font = Enum.Font.Gotham
+    hitboxTransparencyLabel.TextSize = 9
+    hitboxTransparencyLabel.TextXAlignment = Enum.TextXAlignment.Left
+    hitboxTransparencyLabel.Parent = Content
+
+    local sep1 = Instance.new("Frame")
+    sep1.Size = UDim2.new(0.9, 0, 0, 1)
+    sep1.BackgroundColor3 = Color3.fromRGB(60, 60, 60)
+    sep1.Parent = Content
+
+    -- WALKSPEED
+    local wT = Instance.new("TextLabel")
+    wT.Size = UDim2.new(0.9, 0, 0, 20)
+    wT.BackgroundTransparency = 1
+    wT.Text = "[>] LOOP WALKSPEED"
+    wT.TextColor3 = Color3.fromRGB(255, 200, 100)
+    wT.Font = Enum.Font.GothamBold
+    wT.TextSize = 11
+    wT.TextXAlignment = Enum.TextXAlignment.Left
+    wT.Parent = Content
+
+    local wc = Instance.new("Frame")
+    wc.Size = UDim2.new(0.9, 0, 0, 35)
+    wc.BackgroundTransparency = 1
+    wc.Parent = Content
+
+    walkSpeedBtn = Instance.new("TextButton")
+    walkSpeedBtn.Size = UDim2.new(0.35, 0, 1, 0)
+    walkSpeedBtn.BackgroundColor3 = Color3.fromRGB(30, 30, 30)
+    walkSpeedBtn.Text = "LOOP\nOFF"
+    walkSpeedBtn.TextColor3 = Color3.fromRGB(255, 80, 80)
+    walkSpeedBtn.Font = Enum.Font.GothamBold
+    walkSpeedBtn.TextSize = 9
+    walkSpeedBtn.TextWrapped = true
+    walkSpeedBtn.Parent = wc
+    local wbc = Instance.new("UICorner") wbc.CornerRadius = UDim.new(0, 6) wbc.Parent = walkSpeedBtn
+
+    local walkSpeedInput = Instance.new("TextBox")
+    walkSpeedInput.Size = UDim2.new(0.55, 0, 1, 0)
+    walkSpeedInput.Position = UDim2.new(0.38, 0, 0, 0)
+    walkSpeedInput.BackgroundColor3 = Color3.fromRGB(25, 25, 25)
+    walkSpeedInput.TextColor3 = Color3.fromRGB(255, 255, 255)
+    walkSpeedInput.Font = Enum.Font.Gotham
+    walkSpeedInput.TextSize = 10
+    walkSpeedInput.Text = "16"
+    walkSpeedInput.Parent = wc
+    local wic = Instance.new("UICorner") wic.CornerRadius = UDim.new(0, 5) wic.Parent = walkSpeedInput
+
+    walkSpeedValueLabel = Instance.new("TextLabel")
+    walkSpeedValueLabel.Size = UDim2.new(0.9, 0, 0, 20)
+    walkSpeedValueLabel.BackgroundTransparency = 1
+    walkSpeedValueLabel.Text = "Velocidad actual: 16"
+    walkSpeedValueLabel.TextColor3 = Color3.fromRGB(150, 150, 150)
+    walkSpeedValueLabel.Font = Enum.Font.Gotham
+    walkSpeedValueLabel.TextSize = 9
+    walkSpeedValueLabel.TextXAlignment = Enum.TextXAlignment.Left
+    walkSpeedValueLabel.Parent = Content
+
+    local sep2 = Instance.new("Frame")
+    sep2.Size = UDim2.new(0.9, 0, 0, 1)
+    sep2.BackgroundColor3 = Color3.fromRGB(60, 60, 60)
+    sep2.Parent = Content
+
+    -- TP WALK
+    local tpT = Instance.new("TextLabel")
+    tpT.Size = UDim2.new(0.9, 0, 0, 20)
+    tpT.BackgroundTransparency = 1
+    tpT.Text = "[*] TP WALK"
+    tpT.TextColor3 = Color3.fromRGB(255, 200, 100)
+    tpT.Font = Enum.Font.GothamBold
+    tpT.TextSize = 11
+    tpT.TextXAlignment = Enum.TextXAlignment.Left
+    tpT.Parent = Content
+
+    local tpc = Instance.new("Frame")
+    tpc.Size = UDim2.new(0.9, 0, 0, 35)
+    tpc.BackgroundTransparency = 1
+    tpc.Parent = Content
+
+    tpWalkBtn = Instance.new("TextButton")
+    tpWalkBtn.Size = UDim2.new(0.35, 0, 1, 0)
+    tpWalkBtn.BackgroundColor3 = Color3.fromRGB(30, 30, 30)
+    tpWalkBtn.Text = "TP\nOFF"
+    tpWalkBtn.TextColor3 = Color3.fromRGB(255, 80, 80)
+    tpWalkBtn.Font = Enum.Font.GothamBold
+    tpWalkBtn.TextSize = 9
+    tpWalkBtn.TextWrapped = true
+    tpWalkBtn.Parent = tpc
+    local tpc2 = Instance.new("UICorner") tpc2.CornerRadius = UDim.new(0, 6) tpc2.Parent = tpWalkBtn
+
+    local tpSpeedInput = Instance.new("TextBox")
+    tpSpeedInput.Size = UDim2.new(0.55, 0, 1, 0)
+    tpSpeedInput.Position = UDim2.new(0.38, 0, 0, 0)
+    tpSpeedInput.BackgroundColor3 = Color3.fromRGB(25, 25, 25)
+    tpSpeedInput.TextColor3 = Color3.fromRGB(255, 255, 255)
+    tpSpeedInput.Font = Enum.Font.Gotham
+    tpSpeedInput.TextSize = 10
+    tpSpeedInput.Text = "3"
+    tpSpeedInput.Parent = tpc
+    local tpic = Instance.new("UICorner") tpic.CornerRadius = UDim.new(0, 5) tpic.Parent = tpSpeedInput
+
+    tpSpeedValueLabel = Instance.new("TextLabel")
+    tpSpeedValueLabel.Size = UDim2.new(0.9, 0, 0, 20)
+    tpSpeedValueLabel.BackgroundTransparency = 1
+    tpSpeedValueLabel.Text = "Velocidad TP: 3"
+    tpSpeedValueLabel.TextColor3 = Color3.fromRGB(150, 150, 150)
+    tpSpeedValueLabel.Font = Enum.Font.Gotham
+    tpSpeedValueLabel.TextSize = 9
+    tpSpeedValueLabel.TextXAlignment = Enum.TextXAlignment.Left
+    tpSpeedValueLabel.Parent = Content
+
+    local sep3 = Instance.new("Frame")
+    sep3.Size = UDim2.new(0.9, 0, 0, 1)
+    sep3.BackgroundColor3 = Color3.fromRGB(60, 60, 60)
+    sep3.Parent = Content
+
+    -- DAMAGE REPEATER
+    local rT = Instance.new("TextLabel")
+    rT.Size = UDim2.new(0.9, 0, 0, 20)
+    rT.BackgroundTransparency = 1
+    rT.Text = "[!] DAMAGE REPEATER"
+    rT.TextColor3 = Color3.fromRGB(255, 200, 100)
+    rT.Font = Enum.Font.GothamBold
+    rT.TextSize = 11
+    rT.TextXAlignment = Enum.TextXAlignment.Left
+    rT.Parent = Content
+
+    local rc = Instance.new("Frame")
+    rc.Size = UDim2.new(0.9, 0, 0, 35)
+    rc.BackgroundTransparency = 1
+    rc.Parent = Content
+
+    local rl = Instance.new("TextLabel")
+    rl.Size = UDim2.new(0.35, 0, 1, 0)
+    rl.BackgroundTransparency = 1
+    rl.Text = "Repeticiones:"
+    rl.TextColor3 = Color3.fromRGB(200, 200, 200)
+    rl.Font = Enum.Font.Gotham
+    rl.TextSize = 10
+    rl.TextXAlignment = Enum.TextXAlignment.Left
+    rl.Parent = rc
+
+    repeatInput = Instance.new("TextBox")
+    repeatInput.Size = UDim2.new(0.55, 0, 1, 0)
+    repeatInput.Position = UDim2.new(0.43, 0, 0, 0)
+    repeatInput.BackgroundColor3 = Color3.fromRGB(25, 25, 25)
+    repeatInput.TextColor3 = Color3.fromRGB(255, 255, 255)
+    repeatInput.Font = Enum.Font.Gotham
+    repeatInput.TextSize = 10
+    repeatInput.Text = tostring(REPEAT_AMOUNT)
+    repeatInput.Parent = rc
+    local ric = Instance.new("UICorner") ric.CornerRadius = UDim.new(0, 5) ric.Parent = repeatInput
+
+    local dc = Instance.new("Frame")
+    dc.Size = UDim2.new(0.9, 0, 0, 35)
+    dc.BackgroundTransparency = 1
+    dc.Parent = Content
+
+    local dl = Instance.new("TextLabel")
+    dl.Size = UDim2.new(0.35, 0, 1, 0)
+    dl.BackgroundTransparency = 1
+    dl.Text = "Distancia max:"
+    dl.TextColor3 = Color3.fromRGB(200, 200, 200)
+    dl.Font = Enum.Font.Gotham
+    dl.TextSize = 10
+    dl.TextXAlignment = Enum.TextXAlignment.Left
+    dl.Parent = dc
+
+    distanceInput = Instance.new("TextBox")
+    distanceInput.Size = UDim2.new(0.55, 0, 1, 0)
+    distanceInput.Position = UDim2.new(0.43, 0, 0, 0)
+    distanceInput.BackgroundColor3 = Color3.fromRGB(25, 25, 25)
+    distanceInput.TextColor3 = Color3.fromRGB(255, 255, 255)
+    distanceInput.Font = Enum.Font.Gotham
+    distanceInput.TextSize = 10
+    distanceInput.Text = tostring(MAX_REPEAT_DISTANCE)
+    distanceInput.Parent = dc
+    local dic = Instance.new("UICorner") dic.CornerRadius = UDim.new(0, 5) dic.Parent = distanceInput
+
+    repeatDistanceLabel = Instance.new("TextLabel")
+    repeatDistanceLabel.Size = UDim2.new(0.9, 0, 0, 20)
+    repeatDistanceLabel.BackgroundTransparency = 1
+    repeatDistanceLabel.Text = "Distancia actual: " .. MAX_REPEAT_DISTANCE
+    repeatDistanceLabel.TextColor3 = Color3.fromRGB(150, 150, 150)
+    repeatDistanceLabel.Font = Enum.Font.Gotham
+    repeatDistanceLabel.TextSize = 9
+    repeatDistanceLabel.TextXAlignment = Enum.TextXAlignment.Left
+    repeatDistanceLabel.Parent = Content
+
+    repeatStatusLabel = Instance.new("TextLabel")
+    repeatStatusLabel.Size = UDim2.new(0.9, 0, 0, 20)
+    repeatStatusLabel.BackgroundTransparency = 1
+    repeatStatusLabel.Text = "Estado: OFF"
+    repeatStatusLabel.TextColor3 = Color3.fromRGB(150, 150, 150)
+    repeatStatusLabel.Font = Enum.Font.Gotham
+    repeatStatusLabel.TextSize = 9
+    repeatStatusLabel.TextXAlignment = Enum.TextXAlignment.Left
+    repeatStatusLabel.Parent = Content
+
+    local sep4 = Instance.new("Frame")
+    sep4.Size = UDim2.new(0.9, 0, 0, 1)
+    sep4.BackgroundColor3 = Color3.fromRGB(60, 60, 60)
+    sep4.Parent = Content
+
+    -- TARGET
+    local tt = Instance.new("TextLabel")
+    tt.Size = UDim2.new(0.9, 0, 0, 20)
+    tt.BackgroundTransparency = 1
+    tt.Text = "[@] TARGET"
+    tt.TextColor3 = Color3.fromRGB(255, 200, 100)
+    tt.Font = Enum.Font.GothamBold
+    tt.TextSize = 11
+    tt.TextXAlignment = Enum.TextXAlignment.Left
+    tt.Parent = Content
+
+    targetBox = Instance.new("TextBox")
+    targetBox.Size = UDim2.new(0.9, 0, 0, 35)
+    targetBox.BackgroundColor3 = Color3.fromRGB(25, 25, 25)
+    targetBox.TextColor3 = Color3.fromRGB(255, 255, 255)
+    targetBox.Font = Enum.Font.Gotham
+    targetBox.TextSize = 10
+    targetBox.PlaceholderText = "Nombre (3+ letras)"
+    targetBox.Text = ""
+    targetBox.Parent = Content
+    local tbc2 = Instance.new("UICorner") tbc2.CornerRadius = UDim.new(0, 5) tbc2.Parent = targetBox
+
+    targetStatus = Instance.new("TextLabel")
+    targetStatus.Size = UDim2.new(0.9, 0, 0, 20)
+    targetStatus.BackgroundTransparency = 1
+    targetStatus.Text = "Objetivo: TODOS"
+    targetStatus.TextColor3 = Color3.fromRGB(120, 200, 255)
+    targetStatus.Font = Enum.Font.Gotham
+    targetStatus.TextSize = 9
+    targetStatus.TextXAlignment = Enum.TextXAlignment.Left
+    targetStatus.Parent = Content
+
+    local btc = Instance.new("Frame")
+    btc.Size = UDim2.new(0.9, 0, 0, 35)
+    btc.BackgroundTransparency = 1
+    btc.Parent = Content
+
+    clearTargetBtn = Instance.new("TextButton")
+    clearTargetBtn.Size = UDim2.new(0.48, 0, 1, 0)
+    clearTargetBtn.BackgroundColor3 = Color3.fromRGB(180, 70, 70)
+    clearTargetBtn.Text = "Limpiar"
+    clearTargetBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+    clearTargetBtn.Font = Enum.Font.GothamBold
+    clearTargetBtn.TextSize = 10
+    clearTargetBtn.Parent = btc
+    local ctc = Instance.new("UICorner") ctc.CornerRadius = UDim.new(0, 5) ctc.Parent = clearTargetBtn
+
+    closestBtn = Instance.new("TextButton")
+    closestBtn.Size = UDim2.new(0.48, 0, 1, 0)
+    closestBtn.Position = UDim2.new(0.52, 0, 0, 0)
+    closestBtn.BackgroundColor3 = Color3.fromRGB(70, 130, 200)
+    closestBtn.Text = "Mas Cercano"
+    closestBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+    closestBtn.Font = Enum.Font.GothamBold
+    closestBtn.TextSize = 10
+    closestBtn.Parent = btc
+    local cbc2 = Instance.new("UICorner") cbc2.CornerRadius = UDim.new(0, 5) cbc2.Parent = closestBtn
+
+    searchResult = Instance.new("TextLabel")
+    searchResult.Size = UDim2.new(0.9, 0, 0, 20)
+    searchResult.BackgroundTransparency = 1
+    searchResult.Text = "Presiona Enter para buscar"
+    searchResult.TextColor3 = Color3.fromRGB(150, 150, 150)
+    searchResult.Font = Enum.Font.Gotham
+    searchResult.TextSize = 9
+    searchResult.TextXAlignment = Enum.TextXAlignment.Left
+    searchResult.Parent = Content
+
+    local info = Instance.new("TextLabel")
+    info.Size = UDim2.new(0.9, 0, 0, 20)
+    info.BackgroundTransparency = 1
+    info.Text = "K=Mostrar | E=Hitbox | R=TP Walk"
+    info.TextColor3 = Color3.fromRGB(150, 150, 150)
+    info.Font = Enum.Font.Gotham
+    info.TextSize = 9
+    info.TextXAlignment = Enum.TextXAlignment.Center
+    info.Parent = Content
+
+    -- Eventos inputs
+    hitboxSizeInput.FocusLost:Connect(function(enter)
+        if enter then
+            local v = tonumber(hitboxSizeInput.Text)
+            if v and v >= 0.1 and v <= 100 then
+                setHitboxSize(v)
+                hitboxSizeLabel.Text = "Tamano actual: " .. v
+            else
+                hitboxSizeInput.Text = tostring(HITBOX_SIZE)
+            end
+        end
+    end)
+
+    hitboxTransparencyInput.FocusLost:Connect(function(enter)
+        if enter then
+            local v = tonumber(hitboxTransparencyInput.Text)
+            if v and v >= 0 and v <= 1 then
+                setHitboxTransparency(v)
+                hitboxTransparencyLabel.Text = "Transparencia actual: " .. v
+            else
+                hitboxTransparencyInput.Text = tostring(HITBOX_TRANSPARENCY)
+            end
+        end
+    end)
+
+    walkSpeedInput.FocusLost:Connect(function(enter)
+        if enter then
+            local v = tonumber(walkSpeedInput.Text)
+            if v and v >= 0.1 and v <= 500 then
+                setWalkSpeed(v)
+            else
+                walkSpeedInput.Text = tostring(WalkSpeedValue)
+            end
+        end
+    end)
+
+    tpSpeedInput.FocusLost:Connect(function(enter)
+        if enter then
+            local v = tonumber(tpSpeedInput.Text)
+            if v and v >= 0.01 and v <= 50 then
+                setTPSpeed(v)
+            else
+                tpSpeedInput.Text = tostring(TPSpeedValue)
+            end
+        end
+    end)
+
+    repeatInput.FocusLost:Connect(function(enter)
+        if enter then
+            local v = tonumber(repeatInput.Text)
+            if v and v >= 1 and v <= 100 then
+                setRepeatAmount(v)
+            else
+                repeatInput.Text = tostring(REPEAT_AMOUNT)
+            end
+        end
+    end)
+
+    distanceInput.FocusLost:Connect(function(enter)
+        if enter then
+            local v = tonumber(distanceInput.Text)
+            if v and v >= 1 and v <= 500 then
+                setRepeaterDistance(v)
+            else
+                distanceInput.Text = tostring(MAX_REPEAT_DISTANCE)
+            end
+        end
+    end)
+
+    MakeDraggableWithHandle(Frame, TB)
+    return SG, Frame, CloseBtn
+end
+
+-- ==================== UPDATERS DE BOTONES ====================
+local function updateHitboxButton()
+    if not hitboxBtn then return end
+    if HitboxEnabled then
+        hitboxBtn.Text = "HIT\nON"
+        hitboxBtn.TextColor3 = Color3.fromRGB(80, 255, 80)
+        hitboxBtn.BackgroundColor3 = Color3.fromRGB(40, 70, 40)
+    else
+        hitboxBtn.Text = "HIT\nOFF"
+        hitboxBtn.TextColor3 = Color3.fromRGB(255, 80, 80)
+        hitboxBtn.BackgroundColor3 = Color3.fromRGB(30, 30, 30)
+    end
+end
+
+local function updateTPWalkButton()
+    if not tpWalkBtn then return end
+    if TPWalkEnabled then
+        tpWalkBtn.Text = "TP\nON"
+        tpWalkBtn.TextColor3 = Color3.fromRGB(80, 255, 80)
+        tpWalkBtn.BackgroundColor3 = Color3.fromRGB(40, 70, 40)
+    else
+        tpWalkBtn.Text = "TP\nOFF"
+        tpWalkBtn.TextColor3 = Color3.fromRGB(255, 80, 80)
+        tpWalkBtn.BackgroundColor3 = Color3.fromRGB(30, 30, 30)
+    end
+end
+
+local function updateAntiRagdollButton()
+    if not antiRagdollBtn then return end
+    if AntiRagdollEnabled then
+        antiRagdollBtn.Text = "RAG\nON"
+        antiRagdollBtn.TextColor3 = Color3.fromRGB(80, 255, 80)
+        antiRagdollBtn.BackgroundColor3 = Color3.fromRGB(40, 70, 40)
+    else
+        antiRagdollBtn.Text = "RAG\nOFF"
+        antiRagdollBtn.TextColor3 = Color3.fromRGB(255, 80, 80)
+        antiRagdollBtn.BackgroundColor3 = Color3.fromRGB(30, 30, 30)
+    end
+end
+
+local function updateWalkSpeedButton()
+    if not walkSpeedBtn then return end
+    if WalkSpeedEnabled then
+        walkSpeedBtn.Text = "LOOP\nON"
+        walkSpeedBtn.TextColor3 = Color3.fromRGB(80, 255, 80)
+        walkSpeedBtn.BackgroundColor3 = Color3.fromRGB(40, 70, 40)
+    else
+        walkSpeedBtn.Text = "LOOP\nOFF"
+        walkSpeedBtn.TextColor3 = Color3.fromRGB(255, 80, 80)
+        walkSpeedBtn.BackgroundColor3 = Color3.fromRGB(30, 30, 30)
+    end
+end
+
+local function updateDamageRepeaterButton()
+    if not damageRepeaterBtn then return end
+    if damageRepeaterEnabled then
+        damageRepeaterBtn.Text = "REP\nON"
+        damageRepeaterBtn.TextColor3 = Color3.fromRGB(80, 255, 80)
+        damageRepeaterBtn.BackgroundColor3 = Color3.fromRGB(40, 70, 40)
+        if repeatStatusLabel then
+            repeatStatusLabel.Text = "Estado: ACTIVADO (dist: " .. MAX_REPEAT_DISTANCE .. ")"
+            repeatStatusLabel.TextColor3 = Color3.fromRGB(80, 255, 80)
+        end
+    else
+        damageRepeaterBtn.Text = "REP\nOFF"
+        damageRepeaterBtn.TextColor3 = Color3.fromRGB(255, 80, 80)
+        damageRepeaterBtn.BackgroundColor3 = Color3.fromRGB(30, 30, 30)
+        if repeatStatusLabel then
+            repeatStatusLabel.Text = "Estado: DESACTIVADO"
+            repeatStatusLabel.TextColor3 = Color3.fromRGB(150, 150, 150)
+        end
+    end
+end
+
+local function updateTargetStatus()
+    if not targetStatus then return end
+    if targetPlayer then
+        targetStatus.Text = "Objetivo: " .. exactTargetName
+        targetStatus.TextColor3 = Color3.fromRGB(80, 255, 80)
+        if targetBox then targetBox.Text = exactTargetName end
+    else
+        targetStatus.Text = "Objetivo: TODOS"
+        targetStatus.TextColor3 = Color3.fromRGB(120, 200, 255)
+    end
+end
+
+local function searchAndSetTarget()
+    if not targetBox then return end
+    local s = targetBox.Text:gsub("%s+", "")
+    local found, rname = findPlayerByPartialName(s)
+    if found then
+        targetPlayer = found
+        exactTargetName = rname
+        updateTargetStatus()
+        if searchResult then
+            searchResult.Text = "[OK] Encontrado: " .. exactTargetName
+            searchResult.TextColor3 = Color3.fromRGB(80, 255, 80)
+        end
+        if HitboxEnabled then updateHitboxes() end
+    elseif found == nil then
+        targetPlayer = nil
+        exactTargetName = "TODOS"
+        updateTargetStatus()
+        if searchResult then
+            searchResult.Text = "[OK] Modo: TODOS"
+            searchResult.TextColor3 = Color3.fromRGB(120, 200, 255)
+        end
+        if HitboxEnabled then updateHitboxes() end
+    else
+        if searchResult then
+            searchResult.Text = rname
+            searchResult.TextColor3 = Color3.fromRGB(255, 80, 80)
+        end
+    end
+    task.wait(2)
+    if searchResult then
+        searchResult.Text = "Presiona Enter para buscar"
+        searchResult.TextColor3 = Color3.fromRGB(150, 150, 150)
+    end
+end
+
+local function targetClosest()
+    if not searchResult then return end
+    local bestD, bestP = math.huge, nil
+    local mc = player.Character
+    local mr = mc and (mc:FindFirstChild("HumanoidRootPart") or mc:FindFirstChild("Torso") or mc:FindFirstChild("UpperTorso"))
+    if not mr then
+        searchResult.Text = "[X] No se puede calcular"
+        searchResult.TextColor3 = Color3.fromRGB(255, 80, 80)
+        task.wait(2)
+        searchResult.Text = "Presiona Enter para buscar"
+        searchResult.TextColor3 = Color3.fromRGB(150, 150, 150)
+        return
+    end
+    for _, v in pairs(Players:GetPlayers()) do
+        if v ~= player then
+            pcall(function()
+                local ch = v.Character
+                if ch then
+                    local r = ch:FindFirstChild("HumanoidRootPart") or ch:FindFirstChild("Torso") or ch:FindFirstChild("UpperTorso")
+                    if r then
+                        local d = (r.Position - mr.Position).Magnitude
+                        if d < bestD then bestD = d; bestP = v end
+                    end
+                end
+            end)
+        end
+    end
+    if bestP then
+        targetPlayer = bestP
+        exactTargetName = bestP.DisplayName .. " (" .. bestP.Name .. ")"
+        updateTargetStatus()
+        if targetBox then targetBox.Text = bestP.Name end
+        searchResult.Text = "[OK] Target: " .. exactTargetName .. " (d:" .. math.floor(bestD) .. ")"
+        searchResult.TextColor3 = Color3.fromRGB(80, 255, 80)
+        if HitboxEnabled then updateHitboxes() end
+        task.wait(2)
+        searchResult.Text = "Presiona Enter para buscar"
+        searchResult.TextColor3 = Color3.fromRGB(150, 150, 150)
+    else
+        searchResult.Text = "[X] No hay jugadores cercanos"
+        searchResult.TextColor3 = Color3.fromRGB(255, 80, 80)
+        task.wait(2)
+        searchResult.Text = "Presiona Enter para buscar"
+        searchResult.TextColor3 = Color3.fromRGB(150, 150, 150)
+    end
+end
+
+local function clearTarget()
+    targetPlayer = nil
+    exactTargetName = "TODOS"
+    if targetBox then targetBox.Text = "" end
+    updateTargetStatus()
+    if HitboxEnabled then updateHitboxes() end
+    if searchResult then
+        searchResult.Text = "[OK] Target limpiado"
+        searchResult.TextColor3 = Color3.fromRGB(120, 200, 255)
+        task.wait(2)
+        searchResult.Text = "Presiona Enter para buscar"
+        searchResult.TextColor3 = Color3.fromRGB(150, 150, 150)
+    end
+end
+
+-- ==================== CREAR UI ====================
+local buttonsGUI, buttonsFrame, configButton = CreateButtonsInterface()
+local configGUI, configFrame, closeConfigBtn = CreateConfigInterface()
+
+-- ==================== CONECTAR EVENTOS ====================
+hitboxBtn.MouseButton1Click:Connect(function()
+    HitboxEnabled = not HitboxEnabled
+    updateHitboxButton()
+    if HitboxEnabled then updateHitboxes() else resetAllHitboxes() end
+end)
+
+tpWalkBtn.MouseButton1Click:Connect(function()
+    setTPWalkEnabled(not TPWalkEnabled)
+    updateTPWalkButton()
+end)
+
+antiRagdollBtn.MouseButton1Click:Connect(function()
+    toggleAntiRagdoll()
+    updateAntiRagdollButton()
+end)
+
+damageRepeaterBtn.MouseButton1Click:Connect(function()
+    toggleDamageRepeater()
+    updateDamageRepeaterButton()
+end)
+
+configButton.MouseButton1Click:Connect(function()
+    configGUI.Enabled = not configGUI.Enabled
+end)
+
+closeConfigBtn.MouseButton1Click:Connect(function()
+    configGUI.Enabled = false
+end)
+
+if walkSpeedBtn then
+    walkSpeedBtn.MouseButton1Click:Connect(function()
+        setWalkSpeedEnabled(not WalkSpeedEnabled)
+        updateWalkSpeedButton()
+    end)
+end
+
+if targetBox then
+    targetBox.FocusLost:Connect(function(enter)
+        if enter then searchAndSetTarget() end
+    end)
+end
+
+if clearTargetBtn then clearTargetBtn.MouseButton1Click:Connect(clearTarget) end
+if closestBtn then closestBtn.MouseButton1Click:Connect(targetClosest) end
+
+-- ==================== EVENTOS DE JUGADORES ====================
+Players.PlayerRemoving:Connect(function(p)
+    if targetPlayer == p then
+        targetPlayer = nil
+        exactTargetName = "TODOS"
+        if targetBox then targetBox.Text = "" end
+        updateTargetStatus()
+        if searchResult then
+            searchResult.Text = "[!] Objetivo salio del juego"
+            searchResult.TextColor3 = Color3.fromRGB(255, 150, 50)
+            task.wait(2)
+            searchResult.Text = "Presiona Enter para buscar"
+            searchResult.TextColor3 = Color3.fromRGB(150, 150, 150)
+        end
+        if HitboxEnabled then updateHitboxes() end
+    end
+end)
+
+Players.PlayerAdded:Connect(function(p)
+    task.wait(1)
+    if HitboxEnabled and shouldHitPlayer(p) then applyHitboxToPlayer(p) end
+end)
+
+for _, p in pairs(Players:GetPlayers()) do
+    p.CharacterAdded:Connect(function()
+        task.wait(0.5)
+        if HitboxEnabled and shouldHitPlayer(p) then applyHitboxToPlayer(p) end
+    end)
+end
+
+-- ==================== TECLAS ====================
+UserInputService.InputBegan:Connect(function(input, gp)
+    if gp then return end
+    if input.KeyCode == Enum.KeyCode.K then
+        if buttonsGUI then buttonsGUI.Enabled = not buttonsGUI.Enabled end
+    elseif input.KeyCode == Enum.KeyCode.E then
+        HitboxEnabled = not HitboxEnabled
+        updateHitboxButton()
+        if HitboxEnabled then updateHitboxes() else resetAllHitboxes() end
+    elseif input.KeyCode == Enum.KeyCode.R then
+        setTPWalkEnabled(not TPWalkEnabled)
+        updateTPWalkButton()
+    end
+end)
+
+-- ==================== LOOP HITBOX ====================
+hitboxConnection = RunService.Heartbeat:Connect(updateHitboxes)
+
+-- ==================== INICIALIZACIÓN ====================
+updateTargetStatus()
+updateHitboxButton()
+updateTPWalkButton()
+updateAntiRagdollButton()
+updateWalkSpeedButton()
+updateDamageRepeaterButton()
+setWalkSpeed(16)
+setTPSpeed(3)
+setHitboxSize(30)
+setHitboxTransparency(0.5)
+
+print("=== HITBOX EXPANDER + DAMAGE REPEATER (FIXED) ===")
+print("[OK] Script cargado correctamente")
+print("[OK] Teclas: K=Mostrar | E=Hitbox | R=TP Walk")
+
+end) -- fin pcall
+
+if not ok then
+    warn("========================================")
+    warn("[ERROR FATAL] " .. tostring(err))
+    warn("========================================")
+    pcall(function()
+        local plr = game:GetService("Players").LocalPlayer
+        local sg = Instance.new("ScreenGui")
+        sg.Name = "ErrorGUI"
+        sg.ResetOnSpawn = false
+        if gethui then sg.Parent = gethui()
+        else sg.Parent = plr:WaitForChild("PlayerGui") end
+
+        local f = Instance.new("Frame")
+        f.Size = UDim2.new(0, 400, 0, 200)
+        f.Position = UDim2.new(0.5, -200, 0.5, -100)
+        f.BackgroundColor3 = Color3.fromRGB(30, 0, 0)
+        f.BorderSizePixel = 0
+        f.Parent = sg
+        Instance.new("UICorner", f).CornerRadius = UDim.new(0, 10)
+
+        local t = Instance.new("TextLabel")
+        t.Size = UDim2.new(0.95, 0, 0.95, 0)
+        t.Position = UDim2.new(0.025, 0, 0.025, 0)
+        t.BackgroundTransparency = 1
+        t.Text = "ERROR:\n\n" .. tostring(err)
+        t.TextColor3 = Color3.fromRGB(255, 100, 100)
+        t.TextWrapped = true
+        t.TextScaled = false
+        t.TextSize = 12
+        t.Font = Enum.Font.Code
+        t.TextXAlignment = Enum.TextXAlignment.Left
+        t.TextYAlignment = Enum.TextYAlignment.Top
+        t.Parent = f
+    end)
+end
