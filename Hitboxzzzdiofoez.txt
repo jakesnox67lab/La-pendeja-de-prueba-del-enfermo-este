@@ -1,0 +1,1011 @@
+print("[00] START")
+
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local UIS = game:GetService("UserInputService")
+local RS = game:GetService("ReplicatedStorage")
+local WS = game:GetService("Workspace")
+local plr = Players.LocalPlayer
+print("[01] services")
+
+local hitboxBtn, tpBtn, ragBtn, repBtn, wsBtn
+local tpBtnCfg, hbSizeLbl, hbTransLbl, wsValLbl, tpValLbl
+local repInput, distInput, repStatLbl
+local tgtBox, tgtStat, searchLbl
+local mainGui, cfgGui, mainFrame, cfgFrame, cfgBtn
+local clearBtn, closeBtn, hbSizeInput, hbTransInput, wsInput, tpInput
+print("[02] refs")
+
+local hitboxOn = false
+local ragOn = false
+local tpOn = false
+local wsOn = false
+local repOn = false
+local target = nil
+local targetName = ""
+local HB_SIZE = 30
+local HB_TRANS = 0.5
+local WS_VAL = 16
+local TP_VAL = 3
+local REP_AMT = 26
+local REP_DIST = 30
+local wsConn = nil
+local tpConn = nil
+local ragConn = nil
+local joints = {}
+print("[03] state")
+
+local DMG_NAMES = {"Hit","Damage","DealDamage","TakeDamage","MeleeHit","Punch","Kick","Attack","SwordHit","Swing","Strike","Fire","Shoot","Explosion","Blast"}
+local IGN_NAMES = {"SayMessageRequest","MeleeUpdateEvent","NinjaBombEvent","BulletUpdateEvent","UpdateAnimation","SetAnimation","MoveEvent","JumpEvent","SitEvent","Emote","Dance","Pose","AnimationEvent","CharacterAdded","HumanoidDescription","LoadCharacter","Respawn","Teleport","UpdateMotor6D","SetMotor6D","Ragdoll","Fall"}
+
+local function isDmg(n)
+    local l = string.lower(n)
+    for _, d in ipairs(DMG_NAMES) do
+        local dl = string.lower(d)
+        if l == dl or string.find(l, dl, 1, true) then
+            return true
+        end
+    end
+    return false
+end
+
+local function isIgn(n)
+    local l = string.lower(n)
+    for _, d in ipairs(IGN_NAMES) do
+        local dl = string.lower(d)
+        if l == dl or string.find(l, dl, 1, true) then
+            return true
+        end
+    end
+    return false
+end
+print("[04] helpers")
+
+local function safeParent(g)
+    if type(gethui) == "function" then
+        local ok = pcall(function() g.Parent = gethui() end)
+        if ok then return end
+    end
+    if syn and syn.protect_gui then
+        local ok = pcall(function()
+            syn.protect_gui(g)
+            g.Parent = game:GetService("CoreGui")
+        end)
+        if ok then return end
+    end
+    g.Parent = plr:WaitForChild("PlayerGui", 8)
+end
+print("[05] safeParent")
+
+local function getDist(a, b)
+    if not a or not b then return math.huge end
+    local c1 = a.Character
+    local c2 = b.Character
+    if not c1 or not c2 then return math.huge end
+    local r1 = c1:FindFirstChild("HumanoidRootPart") or c1:FindFirstChild("Torso") or c1:FindFirstChild("UpperTorso")
+    local r2 = c2:FindFirstChild("HumanoidRootPart") or c2:FindFirstChild("Torso") or c2:FindFirstChild("UpperTorso")
+    if not r1 or not r2 then return math.huge end
+    return (r1.Position - r2.Position).Magnitude
+end
+
+local function getTgtFromArgs(...)
+    local args = {...}
+    for i = 1, #args do
+        local a = args[i]
+        if type(a) == "string" then
+            local t = Players:FindFirstChild(a)
+            if t and t ~= plr then return t end
+        elseif type(a) == "table" and a.Name then
+            local t = Players:FindFirstChild(a.Name)
+            if t and t ~= plr then return t end
+        elseif typeof(a) == "Instance" and a:IsA("Player") and a ~= plr then
+            return a
+        end
+    end
+end
+
+local function findPlayer(txt)
+    if txt == "" or string.lower(txt) == "todos" or string.lower(txt) == "all" then
+        return nil, "TODOS"
+    end
+    local s = string.lower(txt)
+    s = string.gsub(s, "%s+", "")
+    for _, p in pairs(Players:GetPlayers()) do
+        if p ~= plr and string.lower(p.Name) == s then return p, p.Name end
+    end
+    for _, p in pairs(Players:GetPlayers()) do
+        if p ~= plr and string.lower(p.DisplayName) == s then return p, p.DisplayName end
+    end
+    if #s >= 3 then
+        for _, p in pairs(Players:GetPlayers()) do
+            if p ~= plr and string.sub(string.lower(p.Name), 1, #s) == s then return p, p.Name end
+        end
+        for _, p in pairs(Players:GetPlayers()) do
+            if p ~= plr then
+                if string.find(string.lower(p.Name), s, 1, true) or string.find(string.lower(p.DisplayName), s, 1, true) then
+                    return p, p.Name
+                end
+            end
+        end
+    end
+    if #s > 0 and #s < 3 then return false, "Minimo 3 letras" end
+    return false, "No encontrado"
+end
+print("[06] player helpers")
+
+local function mkBtn(parent, txt, x, w)
+    local b = Instance.new("TextButton")
+    b.Size = UDim2.new(w or 0.24, 0, 1, 0)
+    b.Position = UDim2.new(x, 0, 0, 0)
+    b.BackgroundColor3 = Color3.fromRGB(30, 30, 30)
+    b.Text = txt
+    b.TextColor3 = Color3.fromRGB(255, 80, 80)
+    b.Font = Enum.Font.GothamBold
+    b.TextSize = 11
+    b.TextWrapped = true
+    b.Parent = parent
+    local c = Instance.new("UICorner")
+    c.CornerRadius = UDim.new(0, 8)
+    c.Parent = b
+    return b
+end
+
+local function mkLbl(parent, txt, color)
+    local l = Instance.new("TextLabel")
+    l.Size = UDim2.new(0.9, 0, 0, 18)
+    l.BackgroundTransparency = 1
+    l.Text = txt
+    l.TextColor3 = color or Color3.fromRGB(150, 150, 150)
+    l.Font = Enum.Font.Gotham
+    l.TextSize = 9
+    l.TextXAlignment = Enum.TextXAlignment.Left
+    l.Parent = parent
+    return l
+end
+print("[07] ui helpers")
+
+mainGui = Instance.new("ScreenGui")
+mainGui.Name = "HB_Main"
+mainGui.ResetOnSpawn = false
+mainGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+safeParent(mainGui)
+
+mainFrame = Instance.new("Frame")
+mainFrame.Size = UDim2.new(0, 320, 0, 85)
+mainFrame.Position = UDim2.new(0.5, -160, 0.02, 0)
+mainFrame.BackgroundColor3 = Color3.fromRGB(20, 20, 25)
+mainFrame.BackgroundTransparency = 0.05
+mainFrame.BorderSizePixel = 0
+mainFrame.Parent = mainGui
+local mc = Instance.new("UICorner")
+mc.CornerRadius = UDim.new(0, 12)
+mc.Parent = mainFrame
+
+local topBar = Instance.new("Frame")
+topBar.Size = UDim2.new(1, 0, 0, 32)
+topBar.BackgroundColor3 = Color3.fromRGB(50, 50, 65)
+topBar.BorderSizePixel = 0
+topBar.Parent = mainFrame
+local tc = Instance.new("UICorner")
+tc.CornerRadius = UDim.new(0, 12)
+tc.Parent = topBar
+
+local title = Instance.new("TextLabel")
+title.Size = UDim2.new(0.7, 0, 1, 0)
+title.Position = UDim2.new(0, 10, 0, 0)
+title.BackgroundTransparency = 1
+title.Text = "PANEL DE CONTROL"
+title.TextColor3 = Color3.fromRGB(200, 200, 255)
+title.TextSize = 11
+title.Font = Enum.Font.GothamBold
+title.TextXAlignment = Enum.TextXAlignment.Left
+title.Parent = topBar
+
+cfgBtn = Instance.new("TextButton")
+cfgBtn.Size = UDim2.new(0, 36, 0, 26)
+cfgBtn.Position = UDim2.new(1, -42, 0, 3)
+cfgBtn.BackgroundColor3 = Color3.fromRGB(70, 70, 90)
+cfgBtn.Text = "CFG"
+cfgBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+cfgBtn.Font = Enum.Font.GothamBold
+cfgBtn.TextSize = 11
+cfgBtn.Parent = topBar
+local cbc = Instance.new("UICorner")
+cbc.CornerRadius = UDim.new(0, 6)
+cbc.Parent = cfgBtn
+
+local btnRow = Instance.new("Frame")
+btnRow.Size = UDim2.new(0.96, 0, 0.55, 0)
+btnRow.Position = UDim2.new(0.02, 0, 0.45, 0)
+btnRow.BackgroundTransparency = 1
+btnRow.Parent = mainFrame
+
+hitboxBtn = mkBtn(btnRow, "HIT\nOFF", 0.00, 0.24)
+tpBtn = mkBtn(btnRow, "TP\nOFF", 0.25, 0.24)
+ragBtn = mkBtn(btnRow, "RAG\nOFF", 0.50, 0.24)
+repBtn = mkBtn(btnRow, "REP\nOFF", 0.75, 0.24)
+
+local drag = false
+local ds = nil
+local fs = nil
+topBar.InputBegan:Connect(function(i, gp)
+    if gp then return end
+    if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then
+        drag = true
+        ds = i.Position
+        fs = mainFrame.Position
+    end
+end)
+UIS.InputChanged:Connect(function(i, gp)
+    if gp then return end
+    if not drag then return end
+    if i.UserInputType == Enum.UserInputType.MouseMovement or i.UserInputType == Enum.UserInputType.Touch then
+        local d = i.Position - ds
+        mainFrame.Position = UDim2.new(fs.X.Scale, fs.X.Offset + d.X, fs.Y.Scale, fs.Y.Offset + d.Y)
+    end
+end)
+UIS.InputEnded:Connect(function(i)
+    if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then
+        drag = false
+    end
+end)
+print("[08] main UI")
+
+cfgGui = Instance.new("ScreenGui")
+cfgGui.Name = "HB_Cfg"
+cfgGui.ResetOnSpawn = false
+cfgGui.Enabled = false
+cfgGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+safeParent(cfgGui)
+
+cfgFrame = Instance.new("Frame")
+cfgFrame.Size = UDim2.new(0, 260, 0, 400)
+cfgFrame.Position = UDim2.new(0.5, -130, 0.5, -200)
+cfgFrame.BackgroundColor3 = Color3.fromRGB(15, 15, 15)
+cfgFrame.BorderSizePixel = 0
+cfgFrame.ClipsDescendants = true
+cfgFrame.Parent = cfgGui
+local cfc = Instance.new("UICorner")
+cfc.CornerRadius = UDim.new(0, 12)
+cfc.Parent = cfgFrame
+
+local cfgTop = Instance.new("Frame")
+cfgTop.Size = UDim2.new(1, 0, 0, 32)
+cfgTop.BackgroundColor3 = Color3.fromRGB(50, 50, 65)
+cfgTop.BorderSizePixel = 0
+cfgTop.Parent = cfgFrame
+local ctcc = Instance.new("UICorner")
+ctcc.CornerRadius = UDim.new(0, 12)
+ctcc.Parent = cfgTop
+
+local cfgTitle = Instance.new("TextLabel")
+cfgTitle.Size = UDim2.new(0.7, 0, 1, 0)
+cfgTitle.Position = UDim2.new(0, 10, 0, 0)
+cfgTitle.BackgroundTransparency = 1
+cfgTitle.Text = "CONFIGURACION"
+cfgTitle.TextColor3 = Color3.fromRGB(255, 200, 100)
+cfgTitle.TextSize = 11
+cfgTitle.Font = Enum.Font.GothamBold
+cfgTitle.TextXAlignment = Enum.TextXAlignment.Left
+cfgTitle.Parent = cfgTop
+
+closeBtn = Instance.new("TextButton")
+closeBtn.Size = UDim2.new(0, 28, 0, 26)
+closeBtn.Position = UDim2.new(1, -34, 0, 3)
+closeBtn.BackgroundColor3 = Color3.fromRGB(180, 40, 40)
+closeBtn.Text = "X"
+closeBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+closeBtn.TextSize = 14
+closeBtn.Font = Enum.Font.GothamBold
+closeBtn.Parent = cfgTop
+local cbc2 = Instance.new("UICorner")
+cbc2.CornerRadius = UDim.new(0, 6)
+cbc2.Parent = closeBtn
+
+local content = Instance.new("ScrollingFrame")
+content.Size = UDim2.new(1, 0, 1, -32)
+content.Position = UDim2.new(0, 0, 0, 32)
+content.BackgroundTransparency = 1
+content.ScrollBarThickness = 4
+content.CanvasSize = UDim2.new(0, 0, 0, 520)
+content.Parent = cfgFrame
+local ll = Instance.new("UIListLayout")
+ll.Padding = UDim.new(0, 4)
+ll.Parent = content
+
+local function mkSection(txt)
+    local l = Instance.new("TextLabel")
+    l.Size = UDim2.new(0.9, 0, 0, 20)
+    l.BackgroundTransparency = 1
+    l.Text = txt
+    l.TextColor3 = Color3.fromRGB(255, 200, 100)
+    l.Font = Enum.Font.GothamBold
+    l.TextSize = 11
+    l.TextXAlignment = Enum.TextXAlignment.Left
+    l.Parent = content
+end
+
+local function mkRow()
+    local f = Instance.new("Frame")
+    f.Size = UDim2.new(0.9, 0, 0, 32)
+    f.BackgroundTransparency = 1
+    f.Parent = content
+    return f
+end
+
+local function mkTxt(parent, x, w, def)
+    local t = Instance.new("TextBox")
+    t.Size = UDim2.new(w, 0, 1, 0)
+    t.Position = UDim2.new(x, 0, 0, 0)
+    t.BackgroundColor3 = Color3.fromRGB(25, 25, 25)
+    t.TextColor3 = Color3.fromRGB(255, 255, 255)
+    t.Font = Enum.Font.Gotham
+    t.TextSize = 10
+    t.Text = def
+    t.Parent = parent
+    local c = Instance.new("UICorner")
+    c.CornerRadius = UDim.new(0, 5)
+    c.Parent = t
+    return t
+end
+
+local function mkLbl2(parent, txt)
+    local l = Instance.new("TextLabel")
+    l.Size = UDim2.new(0.4, 0, 1, 0)
+    l.BackgroundTransparency = 1
+    l.Text = txt
+    l.TextColor3 = Color3.fromRGB(200, 200, 200)
+    l.Font = Enum.Font.Gotham
+    l.TextSize = 10
+    l.TextXAlignment = Enum.TextXAlignment.Left
+    l.Parent = parent
+    return l
+end
+
+mkSection("HITBOX")
+local r1 = mkRow()
+mkLbl2(r1, "Tamano:")
+hbSizeInput = mkTxt(r1, 0.42, 0.55, "30")
+hbSizeLbl = mkLbl(content, "Tamano actual: 30")
+
+local r2 = mkRow()
+mkLbl2(r2, "Transp:")
+hbTransInput = mkTxt(r2, 0.42, 0.55, "0.5")
+hbTransLbl = mkLbl(content, "Transparencia actual: 0.5")
+
+mkSection("LOOP WALKSPEED")
+local r3 = mkRow()
+wsBtn = mkBtn(r3, "LOOP\nOFF", 0.00, 0.35)
+wsInput = mkTxt(r3, 0.4, 0.6, "16")
+wsValLbl = mkLbl(content, "Velocidad: 16")
+
+mkSection("TP WALK")
+local r4 = mkRow()
+tpBtnCfg = mkBtn(r4, "TP\nOFF", 0.00, 0.35)
+tpInput = mkTxt(r4, 0.4, 0.6, "3")
+tpValLbl = mkLbl(content, "Velocidad TP: 3")
+
+mkSection("DAMAGE REPEATER")
+local r5 = mkRow()
+mkLbl2(r5, "Repeticiones:")
+repInput = mkTxt(r5, 0.42, 0.55, "26")
+
+local r6 = mkRow()
+mkLbl2(r6, "Distancia max:")
+distInput = mkTxt(r6, 0.42, 0.55, "30")
+
+repStatLbl = mkLbl(content, "Estado: OFF")
+
+mkSection("TARGET")
+tgtBox = Instance.new("TextBox")
+tgtBox.Size = UDim2.new(0.9, 0, 0, 30)
+tgtBox.BackgroundColor3 = Color3.fromRGB(25, 25, 25)
+tgtBox.TextColor3 = Color3.fromRGB(255, 255, 255)
+tgtBox.Font = Enum.Font.Gotham
+tgtBox.TextSize = 10
+tgtBox.PlaceholderText = "Nombre (3+ letras)"
+tgtBox.Text = ""
+tgtBox.Parent = content
+local tbc = Instance.new("UICorner")
+tbc.CornerRadius = UDim.new(0, 5)
+tbc.Parent = tgtBox
+
+tgtStat = mkLbl(content, "Objetivo: TODOS", Color3.fromRGB(120, 200, 255))
+
+local btnRow2 = mkRow()
+clearBtn = Instance.new("TextButton")
+clearBtn.Size = UDim2.new(0.48, 0, 1, 0)
+clearBtn.BackgroundColor3 = Color3.fromRGB(180, 70, 70)
+clearBtn.Text = "Limpiar"
+clearBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+clearBtn.Font = Enum.Font.GothamBold
+clearBtn.TextSize = 10
+clearBtn.Parent = btnRow2
+local c5 = Instance.new("UICorner")
+c5.CornerRadius = UDim.new(0, 5)
+c5.Parent = clearBtn
+
+local closestBtn = Instance.new("TextButton")
+closestBtn.Size = UDim2.new(0.48, 0, 1, 0)
+closestBtn.Position = UDim2.new(0.52, 0, 0, 0)
+closestBtn.BackgroundColor3 = Color3.fromRGB(70, 130, 200)
+closestBtn.Text = "Mas Cercano"
+closestBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+closestBtn.Font = Enum.Font.GothamBold
+closestBtn.TextSize = 10
+closestBtn.Parent = btnRow2
+local c6 = Instance.new("UICorner")
+c6.CornerRadius = UDim.new(0, 5)
+c6.Parent = closestBtn
+
+searchLbl = mkLbl(content, "Presiona Enter para buscar")
+
+local drag2 = false
+local ds2 = nil
+local fs2 = nil
+cfgTop.InputBegan:Connect(function(i, gp)
+    if gp then return end
+    if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then
+        drag2 = true
+        ds2 = i.Position
+        fs2 = cfgFrame.Position
+    end
+end)
+UIS.InputChanged:Connect(function(i, gp)
+    if gp then return end
+    if not drag2 then return end
+    if i.UserInputType == Enum.UserInputType.MouseMovement or i.UserInputType == Enum.UserInputType.Touch then
+        local d = i.Position - ds2
+        cfgFrame.Position = UDim2.new(fs2.X.Scale, fs2.X.Offset + d.X, fs2.Y.Scale, fs2.Y.Offset + d.Y)
+    end
+end)
+UIS.InputEnded:Connect(function(i)
+    if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then
+        drag2 = false
+    end
+end)
+print("[09] config UI")
+
+local function resetHB(t)
+    pcall(function()
+        if t.Character and t.Character:FindFirstChild("HumanoidRootPart") then
+            local rp = t.Character.HumanoidRootPart
+            rp.Size = Vector3.new(2, 2, 1)
+            rp.Transparency = 1
+            rp.Material = Enum.Material.Plastic
+            rp.Color = Color3.fromRGB(255, 255, 255)
+        end
+    end)
+end
+
+local function resetAllHB()
+    for _, p in pairs(Players:GetPlayers()) do
+        if p ~= plr then resetHB(p) end
+    end
+end
+
+local function applyHB(t)
+    pcall(function()
+        if t.Character and t.Character:FindFirstChild("HumanoidRootPart") then
+            local rp = t.Character.HumanoidRootPart
+            rp.Size = Vector3.new(HB_SIZE, HB_SIZE, HB_SIZE)
+            rp.Transparency = HB_TRANS
+            rp.Color = Color3.fromRGB(255, 0, 0)
+            rp.Material = Enum.Material.SmoothPlastic
+            rp.CanCollide = false
+        end
+    end)
+end
+
+local function shouldHit(p)
+    return p ~= plr and p.Character and p.Character:FindFirstChild("HumanoidRootPart")
+end
+
+local function updateHB()
+    if not hitboxOn then
+        resetAllHB()
+        return
+    end
+    if target then
+        if shouldHit(target) then
+            for _, p in pairs(Players:GetPlayers()) do
+                if p ~= plr and p ~= target then resetHB(p) end
+            end
+            applyHB(target)
+        else
+            resetHB(target)
+        end
+    else
+        for _, p in pairs(Players:GetPlayers()) do
+            if shouldHit(p) then applyHB(p) else resetHB(p) end
+        end
+    end
+end
+print("[10] hitbox")
+
+local function getHum()
+    if plr.Character then
+        return plr.Character:FindFirstChildWhichIsA("Humanoid")
+    end
+end
+
+local function setupWS()
+    if wsConn then wsConn:Disconnect() end
+    wsConn = nil
+    if wsOn then
+        wsConn = RunService.Heartbeat:Connect(function()
+            local h = getHum()
+            if h and math.abs(h.WalkSpeed - WS_VAL) > 0.001 then
+                pcall(function() h.WalkSpeed = WS_VAL end)
+            end
+        end)
+    end
+end
+
+local function setWS(v)
+    WS_VAL = tonumber(v) or 16
+    local h = getHum()
+    if h then pcall(function() h.WalkSpeed = WS_VAL end) end
+    if wsValLbl then wsValLbl.Text = "Velocidad: " .. WS_VAL end
+end
+
+local function toggleWS()
+    wsOn = not wsOn
+    setupWS()
+    local h = getHum()
+    if h then
+        if wsOn then
+            pcall(function() h.WalkSpeed = WS_VAL end)
+        else
+            pcall(function() h.WalkSpeed = 16 end)
+        end
+    end
+    if wsBtn then
+        if wsOn then
+            wsBtn.Text = "LOOP\nON"
+            wsBtn.TextColor3 = Color3.fromRGB(80, 255, 80)
+        else
+            wsBtn.Text = "LOOP\nOFF"
+            wsBtn.TextColor3 = Color3.fromRGB(255, 80, 80)
+        end
+    end
+end
+print("[11] walkspeed")
+
+local function setupTP()
+    if tpConn then tpConn:Disconnect() end
+    tpConn = nil
+    if tpOn then
+        tpConn = RunService.Heartbeat:Connect(function()
+            local c = plr.Character
+            local h = getHum()
+            if c and h and h.Parent and h.MoveDirection.Magnitude > 0 then
+                pcall(function() c:TranslateBy(h.MoveDirection * TP_VAL) end)
+            end
+        end)
+    end
+end
+
+local function setTP(v)
+    TP_VAL = tonumber(v) or 3
+    if tpValLbl then tpValLbl.Text = "Velocidad TP: " .. TP_VAL end
+end
+
+local function toggleTP()
+    tpOn = not tpOn
+    setupTP()
+    if tpBtn then
+        if tpOn then
+            tpBtn.Text = "TP\nON"
+            tpBtn.TextColor3 = Color3.fromRGB(80, 255, 80)
+        else
+            tpBtn.Text = "TP\nOFF"
+            tpBtn.TextColor3 = Color3.fromRGB(255, 80, 80)
+        end
+    end
+    if tpBtnCfg then
+        if tpOn then
+            tpBtnCfg.Text = "TP\nON"
+            tpBtnCfg.TextColor3 = Color3.fromRGB(80, 255, 80)
+        else
+            tpBtnCfg.Text = "TP\nOFF"
+            tpBtnCfg.TextColor3 = Color3.fromRGB(255, 80, 80)
+        end
+    end
+end
+print("[12] tpwalk")
+
+local function updateJoints(c)
+    if not c then return end
+    joints = {}
+    for _, j in pairs(c:GetDescendants()) do
+        if j:IsA("Motor6D") then
+            joints[j.Name] = {Part0 = j.Part0, Part1 = j.Part1, C0 = j.C0, C1 = j.C1}
+        end
+    end
+end
+
+local function ragLoop()
+    if not ragOn then return end
+    local c = plr.Character
+    if not c then return end
+    local h = c:FindFirstChild("Humanoid")
+    local rp = c:FindFirstChild("HumanoidRootPart")
+    if not h or not rp then return end
+    updateJoints(c)
+    local st = h:GetState()
+    if st == Enum.HumanoidStateType.Physics or st == Enum.HumanoidStateType.FallingDown or h.PlatformStand then
+        for n, d in pairs(joints) do
+            if d.Part0 and d.Part0.Parent and not d.Part0:FindFirstChild(n) then
+                local j = Instance.new("Motor6D")
+                j.Name = n
+                j.Part0 = d.Part0
+                j.Part1 = d.Part1
+                j.C0 = d.C0
+                j.C1 = d.C1
+                j.Parent = d.Part0
+            end
+        end
+        pcall(function()
+            h:ChangeState(Enum.HumanoidStateType.Running)
+            h.PlatformStand = false
+            h.Sit = false
+            h.AutoRotate = true
+            rp.Velocity = Vector3.new(rp.Velocity.X, 20, rp.Velocity.Z)
+        end)
+    end
+end
+
+local function toggleRag()
+    ragOn = not ragOn
+    if ragOn then
+        if not ragConn then
+            ragConn = RunService.Heartbeat:Connect(ragLoop)
+        end
+    else
+        if ragConn then
+            ragConn:Disconnect()
+            ragConn = nil
+        end
+    end
+    if ragBtn then
+        if ragOn then
+            ragBtn.Text = "RAG\nON"
+            ragBtn.TextColor3 = Color3.fromRGB(80, 255, 80)
+        else
+            ragBtn.Text = "RAG\nOFF"
+            ragBtn.TextColor3 = Color3.fromRGB(255, 80, 80)
+        end
+    end
+end
+print("[13] antiragdoll")
+
+local hooked = {}
+local lastFire = {}
+
+local function hasMetaFuncs()
+    return type(getrawmetatable) == "function"
+       and type(setreadonly) == "function"
+       and type(getnamecallmethod) == "function"
+end
+
+local function repeatCall(orig, self, ...)
+    local t = getTgtFromArgs(...)
+    if t and getDist(plr, t) > REP_DIST then return false end
+    local now = os.clock()
+    local last = lastFire[self.Name] or 0
+    if now - last < 0.05 then return false end
+    lastFire[self.Name] = now
+    for i = 1, REP_AMT do
+        pcall(function()
+            if orig then
+                orig(self, ...)
+            elseif self:IsA("RemoteEvent") then
+                self:FireServer(self, ...)
+            elseif self:IsA("RemoteFunction") then
+                self:InvokeServer(self, ...)
+            end
+        end)
+        if i % 10 == 0 then task.wait(0.01) end
+    end
+    return true
+end
+
+local function hookRemotes()
+    local function check(r)
+        if hooked[r] then return end
+        if not (r:IsA("RemoteEvent") or r:IsA("RemoteFunction")) then return end
+        local n = r.Name
+        if isIgn(n) then return end
+        local isHit = isDmg(n) or string.find(string.lower(n), "damage", 1, true) or string.find(string.lower(n), "hit", 1, true)
+        if isHit then
+            local m = "FireServer"
+            if r:IsA("RemoteFunction") then m = "InvokeServer" end
+            local orig = r[m]
+            local ok = pcall(function()
+                r[m] = function(self, ...)
+                    if repOn then
+                        local repOk = pcall(function()
+                            return repeatCall(orig, self, ...)
+                        end)
+                        if repOk then return end
+                    end
+                    return orig(self, ...)
+                end
+            end)
+            if ok then hooked[r] = true end
+        end
+    end
+    pcall(function()
+        for _, r in pairs(RS:GetDescendants()) do check(r) end
+    end)
+    pcall(function()
+        for _, r in pairs(plr.PlayerGui:GetDescendants()) do check(r) end
+    end)
+    pcall(function()
+        for _, r in pairs(WS:GetDescendants()) do check(r) end
+    end)
+end
+
+local mt = nil
+local origNC = nil
+local metaOn = false
+
+local function hookMeta()
+    if metaOn then return end
+    if not hasMetaFuncs() then return end
+    pcall(function()
+        mt = getrawmetatable(game)
+        origNC = mt.__namecall
+        setreadonly(mt, false)
+        mt.__namecall = function(self, ...)
+            local m = getnamecallmethod()
+            local ok, n = pcall(function() return self.Name end)
+            if not ok then n = "" end
+            if repOn and (m == "FireServer" or m == "InvokeServer") and isDmg(n) and not isIgn(n) then
+                local t = getTgtFromArgs(...)
+                if t and getDist(plr, t) <= REP_DIST then
+                    for i = 1, REP_AMT do
+                        origNC(self, ...)
+                        if i % 10 == 0 then task.wait(0.005) end
+                    end
+                    return
+                end
+            end
+            return origNC(self, ...)
+        end
+        metaOn = true
+    end)
+end
+
+local function toggleRep()
+    repOn = not repOn
+    if repOn then
+        hookRemotes()
+        hookMeta()
+    else
+        if mt and origNC and metaOn then
+            pcall(function()
+                mt.__namecall = origNC
+                setreadonly(mt, true)
+            end)
+            metaOn = false
+        end
+    end
+    if repBtn then
+        if repOn then
+            repBtn.Text = "REP\nON"
+            repBtn.TextColor3 = Color3.fromRGB(80, 255, 80)
+        else
+            repBtn.Text = "REP\nOFF"
+            repBtn.TextColor3 = Color3.fromRGB(255, 80, 80)
+        end
+    end
+    if repStatLbl then
+        if repOn then
+            repStatLbl.Text = "ON (" .. REP_AMT .. "x)"
+        else
+            repStatLbl.Text = "Estado: OFF"
+        end
+    end
+end
+print("[14] repeater")
+
+hitboxBtn.MouseButton1Click:Connect(function()
+    hitboxOn = not hitboxOn
+    if hitboxOn then
+        hitboxBtn.Text = "HIT\nON"
+        hitboxBtn.TextColor3 = Color3.fromRGB(80, 255, 80)
+        updateHB()
+    else
+        hitboxBtn.Text = "HIT\nOFF"
+        hitboxBtn.TextColor3 = Color3.fromRGB(255, 80, 80)
+        resetAllHB()
+    end
+end)
+
+tpBtn.MouseButton1Click:Connect(toggleTP)
+ragBtn.MouseButton1Click:Connect(toggleRag)
+repBtn.MouseButton1Click:Connect(toggleRep)
+wsBtn.MouseButton1Click:Connect(toggleWS)
+if tpBtnCfg then tpBtnCfg.MouseButton1Click:Connect(toggleTP) end
+
+cfgBtn.MouseButton1Click:Connect(function()
+    cfgGui.Enabled = not cfgGui.Enabled
+end)
+closeBtn.MouseButton1Click:Connect(function()
+    cfgGui.Enabled = false
+end)
+
+hbSizeInput.FocusLost:Connect(function(e)
+    if e then
+        local v = tonumber(hbSizeInput.Text)
+        if v and v >= 1 and v <= 100 then
+            HB_SIZE = v
+            hbSizeLbl.Text = "Tamano actual: " .. v
+            if hitboxOn then updateHB() end
+        else
+            hbSizeInput.Text = tostring(HB_SIZE)
+        end
+    end
+end)
+
+hbTransInput.FocusLost:Connect(function(e)
+    if e then
+        local v = tonumber(hbTransInput.Text)
+        if v and v >= 0 and v <= 1 then
+            HB_TRANS = v
+            hbTransLbl.Text = "Transparencia actual: " .. v
+            if hitboxOn then updateHB() end
+        else
+            hbTransInput.Text = tostring(HB_TRANS)
+        end
+    end
+end)
+
+wsInput.FocusLost:Connect(function(e)
+    if e then
+        local v = tonumber(wsInput.Text)
+        if v then setWS(v) else wsInput.Text = tostring(WS_VAL) end
+    end
+end)
+
+tpInput.FocusLost:Connect(function(e)
+    if e then
+        local v = tonumber(tpInput.Text)
+        if v then setTP(v) else tpInput.Text = tostring(TP_VAL) end
+    end
+end)
+
+repInput.FocusLost:Connect(function(e)
+    if e then
+        local v = tonumber(repInput.Text)
+        if v and v >= 1 and v <= 100 then
+            REP_AMT = v
+        else
+            repInput.Text = tostring(REP_AMT)
+        end
+    end
+end)
+
+distInput.FocusLost:Connect(function(e)
+    if e then
+        local v = tonumber(distInput.Text)
+        if v and v >= 1 and v <= 500 then
+            REP_DIST = v
+        else
+            distInput.Text = tostring(REP_DIST)
+        end
+    end
+end)
+
+tgtBox.FocusLost:Connect(function(e)
+    if e then
+        local s = string.gsub(tgtBox.Text, "%s+", "")
+        local found, nm = findPlayer(s)
+        if found then
+            target = found
+            targetName = nm
+            tgtStat.Text = "Objetivo: " .. nm
+            tgtStat.TextColor3 = Color3.fromRGB(80, 255, 80)
+            if hitboxOn then updateHB() end
+        elseif found == nil then
+            target = nil
+            targetName = "TODOS"
+            tgtStat.Text = "Objetivo: TODOS"
+            tgtStat.TextColor3 = Color3.fromRGB(120, 200, 255)
+            if hitboxOn then updateHB() end
+        end
+        searchLbl.Text = nm or "..."
+    end
+end)
+
+clearBtn.MouseButton1Click:Connect(function()
+    target = nil
+    targetName = "TODOS"
+    tgtBox.Text = ""
+    tgtStat.Text = "Objetivo: TODOS"
+    tgtStat.TextColor3 = Color3.fromRGB(120, 200, 255)
+    if hitboxOn then updateHB() end
+end)
+
+closestBtn.MouseButton1Click:Connect(function()
+    local bd = math.huge
+    local bp = nil
+    local mc = plr.Character
+    if not mc then return end
+    local mr = mc:FindFirstChild("HumanoidRootPart") or mc:FindFirstChild("Torso") or mc:FindFirstChild("UpperTorso")
+    if not mr then return end
+    for _, p in pairs(Players:GetPlayers()) do
+        if p ~= plr then
+            pcall(function()
+                local c = p.Character
+                if c then
+                    local r = c:FindFirstChild("HumanoidRootPart") or c:FindFirstChild("Torso") or c:FindFirstChild("UpperTorso")
+                    if r then
+                        local d = (r.Position - mr.Position).Magnitude
+                        if d < bd then
+                            bd = d
+                            bp = p
+                        end
+                    end
+                end
+            end)
+        end
+    end
+    if bp then
+        target = bp
+        targetName = bp.Name
+        tgtBox.Text = bp.Name
+        tgtStat.Text = "Objetivo: " .. bp.Name
+        tgtStat.TextColor3 = Color3.fromRGB(80, 255, 80)
+        if hitboxOn then updateHB() end
+    end
+end)
+
+UIS.InputBegan:Connect(function(i, gp)
+    if gp then return end
+    if i.KeyCode == Enum.KeyCode.K then
+        mainGui.Enabled = not mainGui.Enabled
+    elseif i.KeyCode == Enum.KeyCode.E then
+        hitboxOn = not hitboxOn
+        if hitboxOn then
+            hitboxBtn.Text = "HIT\nON"
+            hitboxBtn.TextColor3 = Color3.fromRGB(80, 255, 80)
+            updateHB()
+        else
+            hitboxBtn.Text = "HIT\nOFF"
+            hitboxBtn.TextColor3 = Color3.fromRGB(255, 80, 80)
+            resetAllHB()
+        end
+    elseif i.KeyCode == Enum.KeyCode.R then
+        toggleTP()
+    end
+end)
+
+Players.PlayerRemoving:Connect(function(p)
+    if target == p then
+        target = nil
+        targetName = "TODOS"
+        tgtBox.Text = ""
+        tgtStat.Text = "Objetivo: TODOS"
+        if hitboxOn then updateHB() end
+    end
+end)
+
+Players.PlayerAdded:Connect(function(p)
+    task.wait(1)
+    if hitboxOn and shouldHit(p) then applyHB(p) end
+end)
+
+for _, p in pairs(Players:GetPlayers()) do
+    p.CharacterAdded:Connect(function()
+        task.wait(0.5)
+        if hitboxOn and shouldHit(p) then applyHB(p) end
+    end)
+end
+
+RunService.Heartbeat:Connect(updateHB)
+
+print("[15] events wired")
+print("[OK] SCRIPT CARGADO - K=Panel, E=Hitbox, R=TPWalk")
